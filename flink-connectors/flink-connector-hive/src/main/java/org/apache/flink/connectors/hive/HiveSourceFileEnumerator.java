@@ -18,9 +18,11 @@
 
 package org.apache.flink.connectors.hive;
 
+import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.connector.file.src.FileSourceSplit;
 import org.apache.flink.connector.file.src.enumerate.FileEnumerator;
 import org.apache.flink.connectors.hive.read.HiveSourceSplit;
+import org.apache.flink.connectors.hive.util.HivePartitionUtils;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.util.Preconditions;
 
@@ -36,6 +38,13 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+
+import static org.apache.flink.util.concurrent.Executors.newDirectExecutorService;
 
 /**
  * A {@link FileEnumerator} implementation for hive source, which generates splits based on {@link
@@ -81,10 +90,6 @@ public class HiveSourceFileEnumerator implements FileEnumerator {
             setSplitMaxSize(partitions, jobConf, minNumSplits);
         }
         int threadNum = getThreadNumToSplitHiveFile(jobConf);
-        Preconditions.checkArgument(
-                threadNum >= 1,
-                HiveOptions.TABLE_EXEC_HIVE_LOAD_PARTITION_SPLITS_THREAD_NUM.key()
-                        + " cannot be less than 1");
         List<HiveSourceSplit> hiveSplits = new ArrayList<>();
         try (MRSplitsGetter splitsGetter = new MRSplitsGetter(threadNum)) {
             for (HiveTablePartitionSplits partitionSplits :
@@ -106,8 +111,12 @@ public class HiveSourceFileEnumerator implements FileEnumerator {
         // works for orc format
         for (HiveTablePartition partition : partitions) {
             String serializationLib =
-                    partition.getStorageDescriptor().getSerdeInfo().getSerializationLib();
-            if (!"orc".equalsIgnoreCase(serializationLib)) {
+                    partition
+                            .getStorageDescriptor()
+                            .getSerdeInfo()
+                            .getSerializationLib()
+                            .toLowerCase();
+            if (!serializationLib.contains("orc")) {
                 return false;
             }
         }
@@ -140,21 +149,38 @@ public class HiveSourceFileEnumerator implements FileEnumerator {
         return Math.min(defaultMaxSplitBytes, Math.max(openCostInBytes, bytesPerSplit));
     }
 
-    private static long calculateFilesSizeWithOpenCost(
+    @VisibleForTesting
+    static long calculateFilesSizeWithOpenCost(
             List<HiveTablePartition> partitions, JobConf jobConf, long openCost)
             throws IOException {
         long totalBytesWithWeight = 0;
-        for (HiveTablePartition partition : partitions) {
-            StorageDescriptor sd = partition.getStorageDescriptor();
-            org.apache.hadoop.fs.Path inputPath = new org.apache.hadoop.fs.Path(sd.getLocation());
-            FileSystem fs = inputPath.getFileSystem(jobConf);
-            // it's possible a partition exists in metastore but the data has been removed
-            if (!fs.exists(inputPath)) {
-                continue;
+        int calPartitionSizeThreadNum =
+                Integer.parseInt(
+                        jobConf.get(
+                                HiveOptions.TABLE_EXEC_HIVE_CALCULATE_PARTITION_SIZE_THREAD_NUM
+                                        .key()));
+        ExecutorService executorService = null;
+        try {
+            executorService =
+                    calPartitionSizeThreadNum == 1
+                            ? newDirectExecutorService()
+                            : Executors.newFixedThreadPool(calPartitionSizeThreadNum);
+            List<Future<Long>> partitionFilesSizeFutures = new ArrayList<>();
+            for (HiveTablePartition partition : partitions) {
+                partitionFilesSizeFutures.add(
+                        executorService.submit(
+                                new PartitionFilesSizeCalculator(partition, openCost, jobConf)));
             }
-            for (FileStatus fileStatus : fs.listStatus(inputPath)) {
-                long fileByte = fileStatus.getLen();
-                totalBytesWithWeight += (fileByte + openCost);
+            for (Future<Long> fileSizeFuture : partitionFilesSizeFutures) {
+                try {
+                    totalBytesWithWeight += fileSizeFuture.get();
+                } catch (InterruptedException | ExecutionException e) {
+                    throw new IOException("Fail to calculate total files' size.", e);
+                }
+            }
+        } finally {
+            if (executorService != null) {
+                executorService.shutdown();
             }
         }
         return totalBytesWithWeight;
@@ -199,17 +225,50 @@ public class HiveSourceFileEnumerator implements FileEnumerator {
 
         private static final long serialVersionUID = 1L;
 
-        private final List<HiveTablePartition> partitions;
+        // The binary HiveTablePartition list, serialize it manually at compile time to avoid
+        // deserializing it in TaskManager during runtime.
+        private final List<byte[]> partitionBytes;
         private final JobConfWrapper jobConfWrapper;
 
-        public Provider(List<HiveTablePartition> partitions, JobConfWrapper jobConfWrapper) {
-            this.partitions = partitions;
+        public Provider(List<byte[]> partitionBytes, JobConfWrapper jobConfWrapper) {
+            this.partitionBytes = partitionBytes;
             this.jobConfWrapper = jobConfWrapper;
         }
 
         @Override
         public FileEnumerator create() {
-            return new HiveSourceFileEnumerator(partitions, jobConfWrapper.conf());
+            return new HiveSourceFileEnumerator(
+                    HivePartitionUtils.deserializeHiveTablePartition(partitionBytes),
+                    jobConfWrapper.conf());
+        }
+    }
+
+    /** The calculator to calculate the total bytes with weight for a partition. */
+    public static class PartitionFilesSizeCalculator implements Callable<Long> {
+        private final HiveTablePartition hiveTablePartition;
+        private final Long openCost;
+        private final JobConf jobConf;
+
+        public PartitionFilesSizeCalculator(
+                HiveTablePartition hiveTablePartition, Long openCost, JobConf jobConf) {
+            this.hiveTablePartition = hiveTablePartition;
+            this.openCost = openCost;
+            this.jobConf = jobConf;
+        }
+
+        @Override
+        public Long call() throws Exception {
+            long totalBytesWithWeight = 0L;
+            StorageDescriptor sd = hiveTablePartition.getStorageDescriptor();
+            org.apache.hadoop.fs.Path inputPath = new org.apache.hadoop.fs.Path(sd.getLocation());
+            FileSystem fs = inputPath.getFileSystem(jobConf);
+            if (fs.exists(inputPath)) {
+                for (FileStatus fileStatus : fs.listStatus(inputPath)) {
+                    long fileByte = fileStatus.getLen();
+                    totalBytesWithWeight += (fileByte + openCost);
+                }
+            }
+            return totalBytesWithWeight;
         }
     }
 }

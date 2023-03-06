@@ -204,6 +204,7 @@ class CreateTableLikeTest {
                                 + "    <BRACKET_QUOTED_IDENTIFIER> ...\n"
                                 + "    <QUOTED_IDENTIFIER> ...\n"
                                 + "    <BACK_QUOTED_IDENTIFIER> ...\n"
+                                + "    <BIG_QUERY_BACK_QUOTED_IDENTIFIER> ...\n"
                                 + "    <HYPHENATED_IDENTIFIER> ...\n"
                                 + "    <IDENTIFIER> ...\n"
                                 + "    <UNICODE_QUOTED_IDENTIFIER> ...\n");
@@ -261,11 +262,10 @@ class CreateTableLikeTest {
 
     private SqlParser createFlinkParser(String expr) {
         SqlParser.Config parserConfig =
-                SqlParser.configBuilder()
-                        .setParserFactory(FlinkSqlParserImpl.FACTORY)
-                        .setLex(Lex.JAVA)
-                        .setIdentifierMaxLength(256)
-                        .build();
+                SqlParser.config()
+                        .withParserFactory(FlinkSqlParserImpl.FACTORY)
+                        .withLex(Lex.JAVA)
+                        .withIdentifierMaxLength(256);
 
         return SqlParser.create(expr, parserConfig);
     }

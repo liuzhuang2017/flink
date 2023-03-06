@@ -71,6 +71,7 @@ import org.apache.flink.runtime.jobmaster.ResourceManagerAddress;
 import org.apache.flink.runtime.leaderretrieval.LeaderRetrievalListener;
 import org.apache.flink.runtime.leaderretrieval.LeaderRetrievalService;
 import org.apache.flink.runtime.memory.MemoryManager;
+import org.apache.flink.runtime.memory.SharedResources;
 import org.apache.flink.runtime.messages.Acknowledge;
 import org.apache.flink.runtime.messages.TaskThreadInfoResponse;
 import org.apache.flink.runtime.messages.ThreadInfoSample;
@@ -93,8 +94,10 @@ import org.apache.flink.runtime.rpc.FatalErrorHandler;
 import org.apache.flink.runtime.rpc.RpcEndpoint;
 import org.apache.flink.runtime.rpc.RpcService;
 import org.apache.flink.runtime.rpc.RpcServiceUtils;
+import org.apache.flink.runtime.security.token.DelegationTokenReceiverRepository;
 import org.apache.flink.runtime.shuffle.ShuffleDescriptor;
 import org.apache.flink.runtime.shuffle.ShuffleEnvironment;
+import org.apache.flink.runtime.state.TaskExecutorChannelStateExecutorFactoryManager;
 import org.apache.flink.runtime.state.TaskExecutorLocalStateStoresManager;
 import org.apache.flink.runtime.state.TaskExecutorStateChangelogStoragesManager;
 import org.apache.flink.runtime.state.TaskLocalStateStore;
@@ -215,6 +218,12 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
     /** The changelog manager for this task, providing changelog storage per job. */
     private final TaskExecutorStateChangelogStoragesManager changelogStoragesManager;
 
+    /**
+     * The channel state executor factory manager for this task, providing channel state executor
+     * factory per job.
+     */
+    private final TaskExecutorChannelStateExecutorFactoryManager channelStateExecutorFactoryManager;
+
     /** Information provider for external resources. */
     private final ExternalResourceInfoProvider externalResourceInfoProvider;
 
@@ -225,6 +234,9 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
     private final KvStateService kvStateService;
 
     private final Executor ioExecutor;
+
+    /** {@link MemoryManager} shared across all tasks. */
+    private final SharedResources sharedResources;
 
     // --------- task slot allocation table -----------
 
@@ -258,6 +270,8 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
 
     private final TaskExecutorPartitionTracker partitionTracker;
 
+    private final DelegationTokenReceiverRepository delegationTokenReceiverRepository;
+
     // --------- resource manager --------
 
     @Nullable private ResourceManagerAddress resourceManagerAddress;
@@ -268,7 +282,7 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
 
     @Nullable private UUID currentRegistrationTimeoutId;
 
-    private Map<JobID, Collection<CompletableFuture<ExecutionState>>>
+    private final Map<JobID, Collection<CompletableFuture<ExecutionState>>>
             taskResultPartitionCleanupFuturesPerJob = new HashMap<>(8);
 
     private final ThreadInfoSampleService threadInfoSampleService;
@@ -284,7 +298,8 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
             @Nullable String metricQueryServiceAddress,
             TaskExecutorBlobService taskExecutorBlobService,
             FatalErrorHandler fatalErrorHandler,
-            TaskExecutorPartitionTracker partitionTracker) {
+            TaskExecutorPartitionTracker partitionTracker,
+            DelegationTokenReceiverRepository delegationTokenReceiverRepository) {
 
         super(rpcService, RpcServiceUtils.createRandomName(TASK_MANAGER_NAME));
 
@@ -297,6 +312,7 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
         this.haServices = checkNotNull(haServices);
         this.fatalErrorHandler = checkNotNull(fatalErrorHandler);
         this.partitionTracker = partitionTracker;
+        this.delegationTokenReceiverRepository = checkNotNull(delegationTokenReceiverRepository);
         this.taskManagerMetricGroup = checkNotNull(taskManagerMetricGroup);
         this.taskExecutorBlobService = checkNotNull(taskExecutorBlobService);
         this.metricQueryServiceAddress = metricQueryServiceAddress;
@@ -310,6 +326,8 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
                 taskExecutorServices.getUnresolvedTaskManagerLocation();
         this.localStateStoresManager = taskExecutorServices.getTaskManagerStateStore();
         this.changelogStoragesManager = taskExecutorServices.getTaskManagerChangelogManager();
+        this.channelStateExecutorFactoryManager =
+                taskExecutorServices.getTaskManagerChannelStateManager();
         this.shuffleEnvironment = taskExecutorServices.getShuffleEnvironment();
         this.kvStateService = taskExecutorServices.getKvStateService();
         this.ioExecutor = taskExecutorServices.getIOExecutor();
@@ -341,6 +359,8 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
 
         this.slotAllocationSnapshotPersistenceService =
                 taskExecutorServices.getSlotAllocationSnapshotPersistenceService();
+
+        this.sharedResources = taskExecutorServices.getSharedResources();
     }
 
     private HeartbeatManager<Void, TaskExecutorHeartbeatPayload>
@@ -468,6 +488,7 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
         }
 
         changelogStoragesManager.shutdown();
+        channelStateExecutorFactoryManager.shutdown();
 
         Preconditions.checkState(jobTable.isEmpty());
 
@@ -564,11 +585,17 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
             }
         }
 
-        Collection<SampleableTask> sampleableTasks =
-                tasks.stream().map(SampleableTaskAdapter::fromTask).collect(Collectors.toList());
+        Map<Long, ExecutionAttemptID> sampleableTasks =
+                tasks.stream()
+                        .collect(
+                                Collectors.toMap(
+                                        task -> task.getExecutingThread().getId(),
+                                        Task::getExecutionId));
 
-        final CompletableFuture<Collection<ThreadInfoSample>> stackTracesFuture =
-                threadInfoSampleService.requestThreadInfoSamples(sampleableTasks, requestParams);
+        final CompletableFuture<Map<ExecutionAttemptID, Collection<ThreadInfoSample>>>
+                stackTracesFuture =
+                        threadInfoSampleService.requestThreadInfoSamples(
+                                sampleableTasks, requestParams);
 
         return stackTracesFuture.thenApply(TaskThreadInfoResponse::new);
     }
@@ -736,6 +763,7 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
                             tdd.getProducedPartitions(),
                             tdd.getInputGates(),
                             memoryManager,
+                            sharedResources,
                             taskExecutorServices.getIOManager(),
                             taskExecutorServices.getShuffleEnvironment(),
                             taskExecutorServices.getKvStateService(),
@@ -753,7 +781,8 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
                             taskManagerConfiguration,
                             taskMetricGroup,
                             partitionStateChecker,
-                            getRpcService().getScheduledExecutor());
+                            getRpcService().getScheduledExecutor(),
+                            channelStateExecutorFactoryManager.getOrCreateExecutorFactory(jobId));
 
             taskMetricGroup.gauge(MetricNames.IS_BACK_PRESSURED, task::isBackPressured);
 
@@ -906,27 +935,40 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
     }
 
     @Override
-    public void releaseOrPromotePartitions(
-            JobID jobId,
-            Set<ResultPartitionID> partitionToRelease,
-            Set<ResultPartitionID> partitionsToPromote) {
+    public void releasePartitions(JobID jobId, Set<ResultPartitionID> partitionIds) {
         try {
-            partitionTracker.stopTrackingAndReleaseJobPartitions(partitionToRelease);
-            partitionTracker.promoteJobPartitions(partitionsToPromote);
+            partitionTracker.stopTrackingAndReleaseJobPartitions(partitionIds);
+            closeJobManagerConnectionIfNoAllocatedResources(jobId);
+        } catch (Throwable t) {
+            onFatalError(t);
+        }
+    }
+
+    @Override
+    public CompletableFuture<Acknowledge> promotePartitions(
+            JobID jobId, Set<ResultPartitionID> partitionIds) {
+        CompletableFuture<Acknowledge> future = new CompletableFuture<>();
+        try {
+            partitionTracker.promoteJobPartitions(partitionIds);
             if (establishedResourceManagerConnection != null) {
                 establishedResourceManagerConnection
                         .getResourceManagerGateway()
                         .reportClusterPartitions(
-                                getResourceID(), partitionTracker.createClusterPartitionReport());
+                                getResourceID(), partitionTracker.createClusterPartitionReport())
+                        .thenAccept(ignore -> future.complete(Acknowledge.get()));
+            } else {
+                future.completeExceptionally(
+                        new RuntimeException(
+                                "Task executor is not connecting to ResourceManager. "
+                                        + "Fail to report cluster partition to ResourceManager"));
             }
             closeJobManagerConnectionIfNoAllocatedResources(jobId);
         } catch (Throwable t) {
-            // TODO: Do we still need this catch branch?
+            future.completeExceptionally(t);
             onFatalError(t);
         }
 
-        // TODO: Maybe it's better to return an Acknowledge here to notify the JM about the
-        // success/failure with an Exception
+        return future;
     }
 
     @Override
@@ -1300,6 +1342,32 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
                         .getConfiguration()
                         .get(ClusterOptions.THREAD_DUMP_STACKTRACE_MAX_DEPTH);
         return CompletableFuture.completedFuture(ThreadDumpInfo.dumpAndCreate(stacktraceMaxDepth));
+    }
+
+    @Override
+    public CompletableFuture<Acknowledge> updateDelegationTokens(
+            ResourceManagerId resourceManagerId, byte[] tokens) {
+        log.info(
+                "Receive update delegation tokens from resource manager with leader id {}.",
+                resourceManagerId);
+
+        if (!isConnectedToResourceManager(resourceManagerId)) {
+            final String message =
+                    String.format(
+                            "TaskManager is not connected to the resource manager %s.",
+                            resourceManagerId);
+            log.debug(message);
+            return FutureUtils.completedExceptionally(new TaskManagerException(message));
+        }
+
+        try {
+            delegationTokenReceiverRepository.onNewTokensObtained(tokens);
+            return CompletableFuture.completedFuture(Acknowledge.get());
+        } catch (Throwable t) {
+            log.error("Could not update delegation tokens.", t);
+            ExceptionUtils.rethrowIfFatalError(t);
+            return FutureUtils.completedExceptionally(t);
+        }
     }
 
     // ------------------------------------------------------------------------
@@ -1814,6 +1882,7 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
         taskManagerMetricGroup.removeJobMetricsGroup(jobId);
         changelogStoragesManager.releaseResourcesForJob(jobId);
         currentSlotOfferPerJob.remove(jobId);
+        channelStateExecutorFactoryManager.releaseResourcesForJob(jobId);
     }
 
     private void scheduleResultPartitionCleanup(JobID jobId) {
@@ -2328,6 +2397,17 @@ public class TaskExecutor extends RpcEndpoint implements TaskExecutorGateway {
             final InstanceID taskExecutorRegistrationId = success.getRegistrationId();
             final ClusterInformation clusterInformation = success.getClusterInformation();
             final ResourceManagerGateway resourceManagerGateway = connection.getTargetGateway();
+
+            byte[] tokens = success.getInitialTokens();
+            if (tokens != null) {
+                try {
+                    log.info("Receive initial delegation tokens from resource manager");
+                    delegationTokenReceiverRepository.onNewTokensObtained(tokens);
+                } catch (Throwable t) {
+                    log.error("Could not update delegation tokens.", t);
+                    ExceptionUtils.rethrowIfFatalError(t);
+                }
+            }
 
             runAsync(
                     () -> {

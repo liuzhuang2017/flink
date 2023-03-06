@@ -23,14 +23,14 @@ import org.apache.flink.table.gateway.rest.message.operation.OperationHandleIdPa
 import org.apache.flink.table.gateway.rest.message.session.SessionHandleIdPathParameter;
 
 /** Message headers for closing operation. */
-public class CloseOperationHeaders extends AbstactOperationHeaders {
+public class CloseOperationHeaders extends AbstractOperationHeaders {
 
     private static final CloseOperationHeaders INSTANCE = new CloseOperationHeaders();
 
     private static final String URL =
             "/sessions/:"
                     + SessionHandleIdPathParameter.KEY
-                    + "/:"
+                    + "/operations/:"
                     + OperationHandleIdPathParameter.KEY
                     + "/close";
 
@@ -51,5 +51,10 @@ public class CloseOperationHeaders extends AbstactOperationHeaders {
 
     public static CloseOperationHeaders getInstance() {
         return INSTANCE;
+    }
+
+    @Override
+    public String operationId() {
+        return "closeOperation";
     }
 }

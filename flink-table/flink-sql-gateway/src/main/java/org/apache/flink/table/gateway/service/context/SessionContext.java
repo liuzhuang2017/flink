@@ -21,29 +21,24 @@ package org.apache.flink.table.gateway.service.context;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.configuration.ReadableConfig;
+import org.apache.flink.configuration.UnmodifiableConfiguration;
 import org.apache.flink.table.api.EnvironmentSettings;
-import org.apache.flink.table.api.TableConfig;
-import org.apache.flink.table.api.TableException;
-import org.apache.flink.table.api.bridge.java.internal.StreamTableEnvironmentImpl;
 import org.apache.flink.table.api.config.TableConfigOptions;
-import org.apache.flink.table.api.internal.TableEnvironmentInternal;
 import org.apache.flink.table.catalog.Catalog;
 import org.apache.flink.table.catalog.CatalogManager;
 import org.apache.flink.table.catalog.FunctionCatalog;
 import org.apache.flink.table.catalog.GenericInMemoryCatalog;
-import org.apache.flink.table.delegation.Executor;
-import org.apache.flink.table.delegation.ExecutorFactory;
-import org.apache.flink.table.delegation.Planner;
-import org.apache.flink.table.factories.FactoryUtil;
-import org.apache.flink.table.factories.PlannerFactoryUtil;
 import org.apache.flink.table.gateway.api.endpoint.EndpointVersion;
+import org.apache.flink.table.gateway.api.session.SessionEnvironment;
 import org.apache.flink.table.gateway.api.session.SessionHandle;
+import org.apache.flink.table.gateway.api.utils.SqlGatewayException;
 import org.apache.flink.table.gateway.service.operation.OperationExecutor;
 import org.apache.flink.table.gateway.service.operation.OperationManager;
 import org.apache.flink.table.gateway.service.utils.SqlExecutionException;
 import org.apache.flink.table.module.Module;
 import org.apache.flink.table.module.ModuleManager;
+import org.apache.flink.table.operations.ModifyOperation;
 import org.apache.flink.table.resource.ResourceManager;
 import org.apache.flink.util.FlinkUserCodeClassLoaders;
 import org.apache.flink.util.MutableURLClassLoader;
@@ -52,15 +47,15 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.lang.reflect.Method;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Deque;
-import java.util.Map;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 
 /**
@@ -83,7 +78,10 @@ public class SessionContext {
 
     private final OperationManager operationManager;
 
-    private SessionContext(
+    private boolean isStatementSetState;
+    private final List<ModifyOperation> statementSetOperations;
+
+    protected SessionContext(
             DefaultContext defaultContext,
             SessionHandle sessionId,
             EndpointVersion endpointVersion,
@@ -98,6 +96,8 @@ public class SessionContext {
         this.userClassloader = classLoader;
         this.sessionState = sessionState;
         this.operationManager = operationManager;
+        this.isStatementSetState = false;
+        this.statementSetOperations = new ArrayList<>();
     }
 
     // --------------------------------------------------------------------------------------------
@@ -108,8 +108,8 @@ public class SessionContext {
         return this.sessionId;
     }
 
-    public Map<String, String> getConfigMap() {
-        return sessionConf.toMap();
+    public Configuration getSessionConf() {
+        return new UnmodifiableConfiguration(sessionConf);
     }
 
     public OperationManager getOperationManager() {
@@ -122,6 +122,14 @@ public class SessionContext {
 
     public SessionState getSessionState() {
         return sessionState;
+    }
+
+    public DefaultContext getDefaultContext() {
+        return defaultContext;
+    }
+
+    public URLClassLoader getUserClassloader() {
+        return userClassloader;
     }
 
     public void set(String key, String value) {
@@ -159,29 +167,36 @@ public class SessionContext {
     // Method to execute commands
     // --------------------------------------------------------------------------------------------
 
-    public void registerCatalog(String catalogName, Catalog catalog) {
-        sessionState.catalogManager.registerCatalog(catalogName, catalog);
-    }
-
-    public void registerModuleAtHead(String moduleName, Module module) {
-        Deque<String> moduleNames = new ArrayDeque<>(sessionState.moduleManager.listModules());
-        moduleNames.addFirst(moduleName);
-
-        sessionState.moduleManager.loadModule(moduleName, module);
-        sessionState.moduleManager.useModules(moduleNames.toArray(new String[0]));
-    }
-
-    public void setCurrentCatalog(String catalog) {
-        sessionState.catalogManager.setCurrentCatalog(catalog);
-    }
-
-    public void setCurrentDatabase(String database) {
-        sessionState.catalogManager.setCurrentDatabase(database);
-    }
-
     public OperationExecutor createOperationExecutor(Configuration executionConfig) {
         return new OperationExecutor(this, executionConfig);
     }
+
+    // --------------------------------------------------------------------------------------------
+    // Begin statement set
+    // --------------------------------------------------------------------------------------------
+
+    public boolean isStatementSetState() {
+        return isStatementSetState;
+    }
+
+    public void enableStatementSet() {
+        isStatementSetState = true;
+    }
+
+    public void disableStatementSet() {
+        isStatementSetState = false;
+        statementSetOperations.clear();
+    }
+
+    public List<ModifyOperation> getStatementSetOperations() {
+        return Collections.unmodifiableList(new ArrayList<>(statementSetOperations));
+    }
+
+    public void addStatementSetOperation(ModifyOperation operation) {
+        statementSetOperations.add(operation);
+    }
+
+    // --------------------------------------------------------------------------------------------
 
     /** Close resources, e.g. catalogs. */
     public void close() {
@@ -190,13 +205,27 @@ public class SessionContext {
             try {
                 sessionState.catalogManager.getCatalog(name).ifPresent(Catalog::close);
             } catch (Throwable t) {
-                LOG.error("Failed to close catalog %s.", t);
+                LOG.error(
+                        String.format(
+                                "Failed to close catalog %s for the session %s.", name, sessionId),
+                        t);
             }
         }
         try {
             userClassloader.close();
         } catch (IOException e) {
-            LOG.debug("Error while closing class loader.", e);
+            LOG.error(
+                    String.format(
+                            "Error while closing class loader for the session %s.", sessionId),
+                    e);
+        }
+        try {
+            sessionState.resourceManager.close();
+        } catch (IOException e) {
+            LOG.error(
+                    String.format(
+                            "Failed to close the resource manager for the session %s.", sessionId),
+                    e);
         }
     }
 
@@ -207,61 +236,23 @@ public class SessionContext {
     public static SessionContext create(
             DefaultContext defaultContext,
             SessionHandle sessionId,
-            EndpointVersion endpointVersion,
-            Configuration sessionConf,
+            SessionEnvironment environment,
             ExecutorService operationExecutorService) {
-        // --------------------------------------------------------------------------------------------------------------
-        // Init config
-        // --------------------------------------------------------------------------------------------------------------
-
-        Configuration configuration = defaultContext.getFlinkConfig().clone();
-        configuration.addAll(sessionConf);
-        // every session configure the specific local resource download directory
-        setResourceDownloadTmpDir(sessionConf, sessionId);
-
-        // --------------------------------------------------------------------------------------------------------------
-        // Init classloader
-        // --------------------------------------------------------------------------------------------------------------
-
+        Configuration configuration =
+                initializeConfiguration(defaultContext, environment, sessionId);
         final MutableURLClassLoader userClassLoader =
                 FlinkUserCodeClassLoaders.create(
-                        new URL[0], SessionContext.class.getClassLoader(), configuration);
-
-        // --------------------------------------------------------------------------------------------------------------
-        // Init session state
-        // --------------------------------------------------------------------------------------------------------------
-
+                        defaultContext.getDependencies().toArray(new URL[0]),
+                        SessionContext.class.getClassLoader(),
+                        configuration);
         final ResourceManager resourceManager = new ResourceManager(configuration, userClassLoader);
-
-        final ModuleManager moduleManager = new ModuleManager();
-
-        final EnvironmentSettings settings =
-                EnvironmentSettings.newInstance().withConfiguration(configuration).build();
-
-        CatalogManager catalogManager =
-                CatalogManager.newBuilder()
-                        // Currently, the classloader is only used by DataTypeFactory.
-                        .classLoader(userClassLoader)
-                        .config(configuration)
-                        .defaultCatalog(
-                                settings.getBuiltInCatalogName(),
-                                new GenericInMemoryCatalog(
-                                        settings.getBuiltInCatalogName(),
-                                        settings.getBuiltInDatabaseName()))
-                        .build();
-
-        final FunctionCatalog functionCatalog =
-                new FunctionCatalog(configuration, resourceManager, catalogManager, moduleManager);
-        SessionState sessionState =
-                new SessionState(catalogManager, moduleManager, resourceManager, functionCatalog);
-
         return new SessionContext(
                 defaultContext,
                 sessionId,
-                endpointVersion,
+                environment.getSessionEndpointVersion(),
                 configuration,
                 userClassLoader,
-                sessionState,
+                initializeSessionState(environment, configuration, resourceManager),
                 new OperationManager(operationExecutorService));
     }
 
@@ -269,98 +260,116 @@ public class SessionContext {
     // Helpers
     // ------------------------------------------------------------------------------------------------------------------
 
-    public TableEnvironmentInternal createTableEnvironment() {
-        // checks the value of RUNTIME_MODE
-        final EnvironmentSettings settings =
-                EnvironmentSettings.newInstance().withConfiguration(sessionConf).build();
-
-        StreamExecutionEnvironment streamExecEnv = createStreamExecutionEnvironment();
-
-        TableConfig tableConfig = TableConfig.getDefault();
-        tableConfig.setRootConfiguration(defaultContext.getFlinkConfig());
-        tableConfig.addConfiguration(sessionConf);
-
-        final Executor executor = lookupExecutor(streamExecEnv, userClassloader);
-        return createStreamTableEnvironment(
-                streamExecEnv,
-                settings,
-                tableConfig,
-                executor,
-                sessionState.catalogManager,
-                sessionState.moduleManager,
-                sessionState.resourceManager,
-                sessionState.functionCatalog);
-    }
-
-    private TableEnvironmentInternal createStreamTableEnvironment(
-            StreamExecutionEnvironment env,
-            EnvironmentSettings settings,
-            TableConfig tableConfig,
-            Executor executor,
-            CatalogManager catalogManager,
-            ModuleManager moduleManager,
-            ResourceManager resourceManager,
-            FunctionCatalog functionCatalog) {
-
-        final Planner planner =
-                PlannerFactoryUtil.createPlanner(
-                        executor,
-                        tableConfig,
-                        resourceManager.getUserClassLoader(),
-                        moduleManager,
-                        catalogManager,
-                        functionCatalog);
-
-        return new StreamTableEnvironmentImpl(
-                catalogManager,
-                moduleManager,
-                resourceManager,
-                functionCatalog,
-                tableConfig,
-                env,
-                planner,
-                executor,
-                settings.isStreamingMode());
-    }
-
-    private static Executor lookupExecutor(
-            StreamExecutionEnvironment executionEnvironment, ClassLoader userClassLoader) {
-        try {
-            final ExecutorFactory executorFactory =
-                    FactoryUtil.discoverFactory(
-                            userClassLoader,
-                            ExecutorFactory.class,
-                            ExecutorFactory.DEFAULT_IDENTIFIER);
-            final Method createMethod =
-                    executorFactory
-                            .getClass()
-                            .getMethod("create", StreamExecutionEnvironment.class);
-
-            return (Executor) createMethod.invoke(executorFactory, executionEnvironment);
-        } catch (Exception e) {
-            throw new TableException(
-                    "Could not instantiate the executor. Make sure a planner module is on the classpath",
-                    e);
-        }
-    }
-
-    private StreamExecutionEnvironment createStreamExecutionEnvironment() {
-        // We need not different StreamExecutionEnvironments to build and submit flink job,
-        // instead we just use StreamExecutionEnvironment#executeAsync(StreamGraph) method
-        // to execute existing StreamGraph.
-        // This requires StreamExecutionEnvironment to have a full flink configuration.
-        return new StreamExecutionEnvironment(new Configuration(sessionConf), userClassloader);
-    }
-
-    private static void setResourceDownloadTmpDir(
-            Configuration configuration, SessionHandle sessionId) {
+    protected static Configuration initializeConfiguration(
+            DefaultContext defaultContext,
+            SessionEnvironment environment,
+            SessionHandle sessionId) {
+        Configuration configuration = defaultContext.getFlinkConfig().clone();
+        configuration.addAll(Configuration.fromMap(environment.getSessionConfig()));
+        // every session configure the specific local resource download directory
         Path path =
                 Paths.get(
-                        configuration.get(TableConfigOptions.RESOURCE_DOWNLOAD_DIR),
+                        configuration.get(TableConfigOptions.RESOURCES_DOWNLOAD_DIR),
                         String.format("sql-gateway-%s", sessionId));
         // override resource download temp directory
         configuration.set(
-                TableConfigOptions.RESOURCE_DOWNLOAD_DIR, path.toAbsolutePath().toString());
+                TableConfigOptions.RESOURCES_DOWNLOAD_DIR, path.toAbsolutePath().toString());
+        return configuration;
+    }
+
+    protected static SessionState initializeSessionState(
+            SessionEnvironment environment,
+            Configuration configuration,
+            ResourceManager resourceManager) {
+        final ModuleManager moduleManager =
+                buildModuleManager(
+                        environment, configuration, resourceManager.getUserClassLoader());
+
+        final CatalogManager catalogManager =
+                buildCatalogManager(
+                        configuration, resourceManager.getUserClassLoader(), environment);
+
+        final FunctionCatalog functionCatalog =
+                new FunctionCatalog(configuration, resourceManager, catalogManager, moduleManager);
+        return new SessionState(catalogManager, moduleManager, resourceManager, functionCatalog);
+    }
+
+    private static ModuleManager buildModuleManager(
+            SessionEnvironment environment,
+            ReadableConfig readableConfig,
+            ClassLoader classLoader) {
+        final ModuleManager moduleManager = new ModuleManager();
+
+        environment
+                .getRegisteredModuleCreators()
+                .forEach(
+                        (moduleName, moduleCreator) -> {
+                            Deque<String> moduleNames =
+                                    new ArrayDeque<>(moduleManager.listModules());
+                            moduleNames.addFirst(moduleName);
+
+                            Module module = moduleCreator.create(readableConfig, classLoader);
+                            moduleManager.loadModule(moduleName, module);
+                            moduleManager.useModules(moduleNames.toArray(new String[0]));
+                        });
+
+        return moduleManager;
+    }
+
+    private static CatalogManager buildCatalogManager(
+            Configuration configuration,
+            URLClassLoader userClassLoader,
+            SessionEnvironment environment) {
+        CatalogManager.Builder builder =
+                CatalogManager.newBuilder()
+                        // Currently, the classloader is only used by DataTypeFactory.
+                        .classLoader(userClassLoader)
+                        .config(configuration);
+
+        // init default catalog
+        String defaultCatalogName;
+        Catalog defaultCatalog;
+        if (environment.getDefaultCatalog().isPresent()) {
+            defaultCatalogName = environment.getDefaultCatalog().get();
+            defaultCatalog =
+                    environment
+                            .getRegisteredCatalogCreators()
+                            .get(defaultCatalogName)
+                            .create(configuration, userClassLoader);
+        } else {
+            EnvironmentSettings settings =
+                    EnvironmentSettings.newInstance().withConfiguration(configuration).build();
+            defaultCatalogName = settings.getBuiltInCatalogName();
+
+            if (environment.getRegisteredCatalogCreators().containsKey(defaultCatalogName)) {
+                throw new SqlGatewayException(
+                        String.format(
+                                "The name of the registered catalog is conflicts with the built-in default catalog name: %s.",
+                                defaultCatalogName));
+            }
+
+            defaultCatalog =
+                    new GenericInMemoryCatalog(
+                            defaultCatalogName, settings.getBuiltInDatabaseName());
+        }
+        defaultCatalog.open();
+
+        CatalogManager catalogManager =
+                builder.defaultCatalog(defaultCatalogName, defaultCatalog).build();
+
+        // filter the default catalog out to avoid repeated registration
+        environment
+                .getRegisteredCatalogCreators()
+                .forEach(
+                        (catalogName, catalogCreator) -> {
+                            if (!catalogName.equals(defaultCatalogName)) {
+                                catalogManager.registerCatalog(
+                                        catalogName,
+                                        catalogCreator.create(configuration, userClassLoader));
+                            }
+                        });
+
+        return catalogManager;
     }
 
     // --------------------------------------------------------------------------------------------

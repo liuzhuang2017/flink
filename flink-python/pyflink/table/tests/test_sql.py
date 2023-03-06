@@ -21,7 +21,7 @@ import subprocess
 
 from pyflink.find_flink_home import _find_flink_source_root
 from pyflink.java_gateway import get_gateway
-from pyflink.table import ResultKind
+from pyflink.table import ResultKind, ExplainDetail
 from pyflink.table import expressions as expr
 from pyflink.testing import source_sink_utils
 from pyflink.testing.test_case_utils import PyFlinkStreamTableTestCase, \
@@ -37,18 +37,23 @@ class StreamSqlTests(PyFlinkStreamTableTestCase):
             .alias("a", "b") \
             .select(expr.call("func1", expr.col("a"), expr.col("b")))
         plan = table.explain()
-        self.assertTrue(plan.find("PythonCalc(select=[func1(f0, f1) AS _c0])") >= 0)
+        self.assertGreaterEqual(plan.find("== Optimized Physical Plan =="), 0)
+        self.assertGreaterEqual(plan.find("PythonCalc(select=[func1(f0, f1) AS _c0])"), 0)
+
+        plan = table.explain(ExplainDetail.PLAN_ADVICE)
+        self.assertGreaterEqual(plan.find("== Optimized Physical Plan With Advice =="), 0)
+        self.assertGreaterEqual(plan.find("No available advice..."), 0)
 
     def test_sql_query(self):
         t_env = self.t_env
         source = t_env.from_elements([(1, "Hi", "Hello"), (2, "Hello", "Hello")], ["a", "b", "c"])
         sink_table_ddl = """
-        CREATE TABLE sinks(a BIGINT, b STRING, c STRING) WITH ('connector'='test-sink')
+        CREATE TABLE sinks_sql_query(a BIGINT, b STRING, c STRING) WITH ('connector'='test-sink')
         """
         t_env.execute_sql(sink_table_ddl)
 
         result = t_env.sql_query("select a + 1, b, c from %s" % source)
-        result.execute_insert("sinks").wait()
+        result.execute_insert("sinks_sql_query").wait()
         actual = source_sink_utils.results()
 
         expected = ['+I[2, Hi, Hello]', '+I[3, Hello, Hello]']
@@ -81,13 +86,6 @@ class StreamSqlTests(PyFlinkStreamTableTestCase):
         """
         t_env.execute_sql(sink_table_ddl)
         table_result = t_env.execute_sql("insert into sinks select * from tbl")
-        from pyflink.common.job_status import JobStatus
-        from py4j.protocol import Py4JJavaError
-        try:
-            self.assertTrue(isinstance(table_result.get_job_client().get_job_status().result(),
-                                       JobStatus))
-        except Py4JJavaError as e:
-            self.assertIn('MiniCluster is not yet running or has already been shut down.', str(e))
 
         job_execution_result = table_result.get_job_client().get_job_execution_result().result()
         self.assertIsNotNone(job_execution_result.get_job_id())

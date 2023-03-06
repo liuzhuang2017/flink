@@ -27,7 +27,7 @@ import org.apache.flink.table.gateway.rest.message.session.SessionMessageParamet
 
 import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponseStatus;
 
-/** Message headers for closing a session. */
+/** Message headers for touching the session. */
 public class TriggerSessionHeartbeatHeaders
         implements SqlGatewayMessageHeaders<
                 EmptyRequestBody, EmptyResponseBody, SessionMessageParameters> {
@@ -75,5 +75,10 @@ public class TriggerSessionHeartbeatHeaders
 
     public static TriggerSessionHeartbeatHeaders getInstance() {
         return INSTANCE;
+    }
+
+    @Override
+    public String operationId() {
+        return "triggerSession";
     }
 }

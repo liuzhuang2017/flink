@@ -26,6 +26,7 @@ import org.apache.flink.configuration.JobManagerOptions;
 import org.apache.flink.configuration.MetricOptions;
 import org.apache.flink.configuration.SchedulerExecutionMode;
 import org.apache.flink.configuration.WebOptions;
+import org.apache.flink.core.execution.CheckpointType;
 import org.apache.flink.core.execution.SavepointFormatType;
 import org.apache.flink.queryablestate.KvStateID;
 import org.apache.flink.runtime.JobException;
@@ -37,6 +38,7 @@ import org.apache.flink.runtime.checkpoint.CheckpointMetrics;
 import org.apache.flink.runtime.checkpoint.CheckpointRecoveryFactory;
 import org.apache.flink.runtime.checkpoint.CheckpointScheduling;
 import org.apache.flink.runtime.checkpoint.CheckpointsCleaner;
+import org.apache.flink.runtime.checkpoint.CompletedCheckpoint;
 import org.apache.flink.runtime.checkpoint.CompletedCheckpointStore;
 import org.apache.flink.runtime.checkpoint.TaskStateSnapshot;
 import org.apache.flink.runtime.client.JobExecutionException;
@@ -94,6 +96,7 @@ import org.apache.flink.runtime.scheduler.SchedulerUtils;
 import org.apache.flink.runtime.scheduler.UpdateSchedulerNgOnInternalFailuresListener;
 import org.apache.flink.runtime.scheduler.VertexParallelismInformation;
 import org.apache.flink.runtime.scheduler.VertexParallelismStore;
+import org.apache.flink.runtime.scheduler.adaptive.allocator.JobAllocationsInformation;
 import org.apache.flink.runtime.scheduler.adaptive.allocator.ReservedSlots;
 import org.apache.flink.runtime.scheduler.adaptive.allocator.SlotAllocator;
 import org.apache.flink.runtime.scheduler.adaptive.allocator.VertexParallelism;
@@ -214,6 +217,8 @@ public class AdaptiveScheduler
 
     private final BoundedFIFOQueue<RootExceptionHistoryEntry> exceptionHistory;
 
+    private final JobManagerJobMetricGroup jobManagerJobMetricGroup;
+
     public AdaptiveScheduler(
             JobGraph jobGraph,
             Configuration configuration,
@@ -295,6 +300,7 @@ public class AdaptiveScheduler
         this.exceptionHistory =
                 new BoundedFIFOQueue<>(
                         configuration.getInteger(WebOptions.MAX_EXCEPTION_HISTORY_SIZE));
+        this.jobManagerJobMetricGroup = jobManagerJobMetricGroup;
     }
 
     private static void assertPreconditions(JobGraph jobGraph) throws RuntimeException {
@@ -623,10 +629,11 @@ public class AdaptiveScheduler
     }
 
     @Override
-    public CompletableFuture<String> triggerCheckpoint() {
+    public CompletableFuture<CompletedCheckpoint> triggerCheckpoint(CheckpointType checkpointType) {
         return state.tryCall(
                         StateWithExecutionGraph.class,
-                        StateWithExecutionGraph::triggerCheckpoint,
+                        stateWithExecutionGraph ->
+                                stateWithExecutionGraph.triggerCheckpoint(checkpointType),
                         "triggerCheckpoint")
                 .orElse(
                         FutureUtils.completedExceptionally(
@@ -754,11 +761,15 @@ public class AdaptiveScheduler
                 .isPresent();
     }
 
-    private VertexParallelism determineParallelism(SlotAllocator slotAllocator)
+    private JobSchedulingPlan determineParallelism(
+            SlotAllocator slotAllocator, @Nullable ExecutionGraph previousExecutionGraph)
             throws NoResourceAvailableException {
 
         return slotAllocator
-                .determineParallelism(jobInformation, declarativeSlotPool.getFreeSlotsInformation())
+                .determineParallelismAndCalculateAssignment(
+                        jobInformation,
+                        declarativeSlotPool.getFreeSlotsInformation(),
+                        JobAllocationsInformation.fromGraph(previousExecutionGraph))
                 .orElseThrow(
                         () ->
                                 new NoResourceAvailableException(
@@ -778,7 +789,7 @@ public class AdaptiveScheduler
     }
 
     @Override
-    public void goToWaitingForResources() {
+    public void goToWaitingForResources(@Nullable ExecutionGraph previousExecutionGraph) {
         final ResourceCounter desiredResources = calculateDesiredResources();
         declarativeSlotPool.setResourceRequirements(desiredResources);
 
@@ -788,7 +799,8 @@ public class AdaptiveScheduler
                         LOG,
                         desiredResources,
                         this.initialResourceAllocationTimeout,
-                        this.resourceStabilizationTimeout));
+                        this.resourceStabilizationTimeout,
+                        previousExecutionGraph));
     }
 
     private ResourceCounter calculateDesiredResources() {
@@ -910,23 +922,26 @@ public class AdaptiveScheduler
     }
 
     @Override
-    public void goToCreatingExecutionGraph() {
+    public void goToCreatingExecutionGraph(@Nullable ExecutionGraph previousExecutionGraph) {
         final CompletableFuture<CreatingExecutionGraph.ExecutionGraphWithVertexParallelism>
                 executionGraphWithAvailableResourcesFuture =
-                        createExecutionGraphWithAvailableResourcesAsync();
-
+                        createExecutionGraphWithAvailableResourcesAsync(previousExecutionGraph);
         transitionToState(
                 new CreatingExecutionGraph.Factory(
-                        this, executionGraphWithAvailableResourcesFuture, LOG));
+                        this,
+                        executionGraphWithAvailableResourcesFuture,
+                        LOG,
+                        previousExecutionGraph));
     }
 
     private CompletableFuture<CreatingExecutionGraph.ExecutionGraphWithVertexParallelism>
-            createExecutionGraphWithAvailableResourcesAsync() {
-        final VertexParallelism vertexParallelism;
+            createExecutionGraphWithAvailableResourcesAsync(
+                    @Nullable ExecutionGraph previousExecutionGraph) {
+        final JobSchedulingPlan schedulingPlan;
         final VertexParallelismStore adjustedParallelismStore;
 
         try {
-            vertexParallelism = determineParallelism(slotAllocator);
+            schedulingPlan = determineParallelism(slotAllocator, previousExecutionGraph);
             JobGraph adjustedJobGraph = jobInformation.copyJobGraph();
 
             for (JobVertex vertex : adjustedJobGraph.getVertices()) {
@@ -934,7 +949,7 @@ public class AdaptiveScheduler
 
                 // use the determined "available parallelism" to use
                 // the resources we have access to
-                vertex.setParallelism(vertexParallelism.getParallelism(id));
+                vertex.setParallelism(schedulingPlan.getVertexParallelism().getParallelism(id));
             }
 
             // use the originally configured max parallelism
@@ -956,7 +971,7 @@ public class AdaptiveScheduler
                 .thenApply(
                         executionGraph ->
                                 CreatingExecutionGraph.ExecutionGraphWithVertexParallelism.create(
-                                        executionGraph, vertexParallelism));
+                                        executionGraph, schedulingPlan));
     }
 
     @Override
@@ -972,10 +987,10 @@ public class AdaptiveScheduler
         executionGraph.setInternalTaskFailuresListener(
                 new UpdateSchedulerNgOnInternalFailuresListener(this));
 
-        final VertexParallelism vertexParallelism =
-                executionGraphWithVertexParallelism.getVertexParallelism();
+        final JobSchedulingPlan jobSchedulingPlan =
+                executionGraphWithVertexParallelism.getJobSchedulingPlan();
         return slotAllocator
-                .tryReserveResources(vertexParallelism)
+                .tryReserveResources(jobSchedulingPlan)
                 .map(
                         reservedSlots ->
                                 CreatingExecutionGraph.AssignmentResult.success(
@@ -1028,6 +1043,10 @@ public class AdaptiveScheduler
                 vertexAttemptNumberStore,
                 adjustedParallelismStore,
                 deploymentTimeMetrics,
+                // adaptive scheduler works in streaming mode, actually it only
+                // supports must be pipelined result partition, mark partition finish is
+                // no need.
+                rp -> false,
                 LOG);
     }
 
@@ -1036,14 +1055,14 @@ public class AdaptiveScheduler
         int availableSlots = declarativeSlotPool.getFreeSlotsInformation().size();
 
         if (availableSlots > 0) {
-            final Optional<? extends VertexParallelism> potentialNewParallelism =
+            final Optional<VertexParallelism> potentialNewParallelism =
                     slotAllocator.determineParallelism(
                             jobInformation, declarativeSlotPool.getAllSlotsInformation());
 
             if (potentialNewParallelism.isPresent()) {
                 int currentCumulativeParallelism = getCurrentCumulativeParallelism(executionGraph);
                 int newCumulativeParallelism =
-                        getCumulativeParallelism(potentialNewParallelism.get());
+                        potentialNewParallelism.get().getCumulativeParallelism();
                 if (newCumulativeParallelism > currentCumulativeParallelism) {
                     LOG.debug(
                             "Offering scale up to scale up controller with currentCumulativeParallelism={}, newCumulativeParallelism={}",
@@ -1060,11 +1079,6 @@ public class AdaptiveScheduler
     private static int getCurrentCumulativeParallelism(ExecutionGraph executionGraph) {
         return executionGraph.getAllVertices().values().stream()
                 .map(ExecutionJobVertex::getParallelism)
-                .reduce(0, Integer::sum);
-    }
-
-    private static int getCumulativeParallelism(VertexParallelism potentialNewParallelism) {
-        return potentialNewParallelism.getMaxParallelismForVertices().values().stream()
                 .reduce(0, Integer::sum);
     }
 
@@ -1111,6 +1125,11 @@ public class AdaptiveScheduler
     @Override
     public ComponentMainThreadExecutor getMainThreadExecutor() {
         return componentMainThreadExecutor;
+    }
+
+    @Override
+    public JobManagerJobMetricGroup getMetricGroup() {
+        return jobManagerJobMetricGroup;
     }
 
     @Override

@@ -683,11 +683,11 @@ class StreamExecutionEnvironment(object):
         .. note::
 
             Please make sure the uploaded python environment matches the platform that the cluster
-            is running on and that the python version must be 3.6 or higher.
+            is running on and that the python version must be 3.7 or higher.
 
         .. note::
 
-            The python udf worker depends on Apache Beam (version == 2.38.0).
+            The python udf worker depends on Apache Beam (version == 2.43.0).
             Please ensure that the specified environment meets the above requirements.
 
         :param python_exec: The path of python interpreter.
@@ -1053,3 +1053,12 @@ class StreamExecutionEnvironment(object):
         Returns whether Unaligned Checkpoints are force-enabled.
         """
         return self._j_stream_execution_environment.isForceUnalignedCheckpoints()
+
+    def close(self):
+        """
+        Close and clean up the execution environment. All the cached intermediate results will be
+        released physically.
+
+        .. versionadded:: 1.16.0
+        """
+        self._j_stream_execution_environment.close()

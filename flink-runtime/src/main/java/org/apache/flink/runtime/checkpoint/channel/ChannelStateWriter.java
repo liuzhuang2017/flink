@@ -18,6 +18,7 @@
 package org.apache.flink.runtime.checkpoint.channel;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.io.network.buffer.Buffer;
 import org.apache.flink.runtime.state.InputChannelStateHandle;
@@ -72,8 +73,20 @@ public interface ChannelStateWriter extends Closeable {
             resultSubpartitionStateHandles.completeExceptionally(e);
         }
 
-        boolean isDone() {
+        public boolean isDone() {
             return inputChannelStateHandles.isDone() && resultSubpartitionStateHandles.isDone();
+        }
+
+        @VisibleForTesting
+        public void waitForDone() {
+            try {
+                inputChannelStateHandles.get();
+            } catch (Throwable ignored) {
+            }
+            try {
+                resultSubpartitionStateHandles.get();
+            } catch (Throwable ignored) {
+            }
         }
     }
 
@@ -96,8 +109,8 @@ public interface ChannelStateWriter extends Closeable {
     /**
      * Add in-flight buffers from the {@link
      * org.apache.flink.runtime.io.network.partition.consumer.InputChannel InputChannel}. Must be
-     * called after {@link #start} (long)} and before {@link #finishInput(long)}. Buffers are
-     * recycled after they are written or exception occurs.
+     * called after {@link #start(long,CheckpointOptions)} and before {@link #finishInput(long)}.
+     * Buffers are recycled after they are written or exception occurs.
      *
      * @param startSeqNum sequence number of the 1st passed buffer. It is intended to use for
      *     incremental snapshots. If no data is passed it is ignored.

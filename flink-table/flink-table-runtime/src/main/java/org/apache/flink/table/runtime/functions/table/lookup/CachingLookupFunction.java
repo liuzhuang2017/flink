@@ -20,7 +20,6 @@ package org.apache.flink.table.runtime.functions.table.lookup;
 
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.annotation.VisibleForTesting;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.metrics.SimpleCounter;
 import org.apache.flink.metrics.groups.CacheMetricGroup;
@@ -39,6 +38,7 @@ import java.io.IOException;
 import java.util.Collection;
 import java.util.Collections;
 
+import static org.apache.flink.runtime.metrics.groups.InternalCacheMetricGroup.UNINITIALIZED;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /**
@@ -54,7 +54,6 @@ public class CachingLookupFunction extends LookupFunction {
 
     // Constants
     public static final String LOOKUP_CACHE_METRIC_GROUP_NAME = "cache";
-    private static final long UNINITIALIZED = -1;
 
     // The actual user-provided lookup function
     @Nullable private final LookupFunction delegate;
@@ -101,17 +100,16 @@ public class CachingLookupFunction extends LookupFunction {
         cacheMetricGroup =
                 new InternalCacheMetricGroup(
                         context.getMetricGroup(), LOOKUP_CACHE_METRIC_GROUP_NAME);
-        loadCounter = new SimpleCounter();
-        cacheMetricGroup.loadCounter(loadCounter);
-        numLoadFailuresCounter = new SimpleCounter();
-        cacheMetricGroup.numLoadFailuresCounter(numLoadFailuresCounter);
-
+        if (!(cache instanceof LookupFullCache)) {
+            loadCounter = new SimpleCounter();
+            cacheMetricGroup.loadCounter(loadCounter);
+            numLoadFailuresCounter = new SimpleCounter();
+            cacheMetricGroup.numLoadFailuresCounter(numLoadFailuresCounter);
+        } else {
+            initializeFullCache(((LookupFullCache) cache), context);
+        }
         // Initialize cache and the delegating function
         cache.open(cacheMetricGroup);
-        if (cache instanceof LookupFullCache) {
-            // TODO add Configuration into FunctionContext
-            ((LookupFullCache) cache).open(new Configuration());
-        }
         if (delegate != null) {
             delegate.open(context);
         }
@@ -158,9 +156,10 @@ public class CachingLookupFunction extends LookupFunction {
             Preconditions.checkState(
                     delegate != null,
                     "User's lookup function can't be null, if there are possible cache misses.");
+            long loadStart = System.currentTimeMillis();
             Collection<RowData> lookupValues = delegate.lookup(keyRow);
+            updateLatestLoadTime(System.currentTimeMillis() - loadStart);
             loadCounter.inc();
-            updateLatestLoadTime();
             return lookupValues;
         } catch (Exception e) {
             // TODO: Should implement retry on failure logic as proposed in FLIP-234
@@ -169,7 +168,7 @@ public class CachingLookupFunction extends LookupFunction {
         }
     }
 
-    private void updateLatestLoadTime() {
+    private void updateLatestLoadTime(long loadTime) {
         checkNotNull(
                 cacheMetricGroup,
                 "Could not register metric '%s' as cache metric group is not initialized",
@@ -178,6 +177,10 @@ public class CachingLookupFunction extends LookupFunction {
         if (latestLoadTime == UNINITIALIZED) {
             cacheMetricGroup.latestLoadTimeGauge(() -> latestLoadTime);
         }
-        latestLoadTime = System.currentTimeMillis();
+        latestLoadTime = loadTime;
+    }
+
+    private void initializeFullCache(LookupFullCache lookupFullCache, FunctionContext context) {
+        lookupFullCache.setUserCodeClassLoader(context.getUserCodeClassLoader());
     }
 }

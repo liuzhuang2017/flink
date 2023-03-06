@@ -19,6 +19,7 @@
 package org.apache.flink.runtime.io.network.partition.hybrid;
 
 import org.apache.flink.runtime.io.network.partition.hybrid.HsSpillingInfoProvider.ConsumeStatus;
+import org.apache.flink.runtime.io.network.partition.hybrid.HsSpillingInfoProvider.ConsumeStatusWithId;
 import org.apache.flink.runtime.io.network.partition.hybrid.HsSpillingInfoProvider.SpillStatus;
 
 import java.util.Deque;
@@ -45,7 +46,7 @@ public class HsSelectiveSpillingStrategy implements HsSpillingStrategy {
     // For the case of buffer finished, there is no need to take action for
     // HsSelectiveSpillingStrategy.
     @Override
-    public Optional<Decision> onBufferFinished(int numTotalUnSpillBuffers) {
+    public Optional<Decision> onBufferFinished(int numTotalUnSpillBuffers, int currentPoolSize) {
         return Optional.of(Decision.NO_ACTION);
     }
 
@@ -85,12 +86,17 @@ public class HsSelectiveSpillingStrategy implements HsSpillingStrategy {
             subpartitionToBuffers.put(
                     channel,
                     spillingInfoProvider.getBuffersInOrder(
-                            channel, SpillStatus.NOT_SPILL, ConsumeStatus.NOT_CONSUMED));
+                            channel,
+                            SpillStatus.NOT_SPILL,
+                            // selective spilling strategy does not support multiple consumer.
+                            ConsumeStatusWithId.fromStatusAndConsumerId(
+                                    ConsumeStatus.NOT_CONSUMED, HsConsumerId.DEFAULT)));
         }
 
         TreeMap<Integer, List<BufferIndexAndChannel>> subpartitionToHighPriorityBuffers =
                 getBuffersByConsumptionPriorityInOrder(
-                        spillingInfoProvider.getNextBufferIndexToConsume(),
+                        // selective spilling strategy does not support multiple consumer.
+                        spillingInfoProvider.getNextBufferIndexToConsume(HsConsumerId.DEFAULT),
                         subpartitionToBuffers,
                         spillNum);
 
@@ -113,12 +119,14 @@ public class HsSelectiveSpillingStrategy implements HsSpillingStrategy {
                             subpartitionId,
                             // get all not start spilling buffers.
                             spillingInfoProvider.getBuffersInOrder(
-                                    subpartitionId, SpillStatus.NOT_SPILL, ConsumeStatus.ALL))
+                                    subpartitionId,
+                                    SpillStatus.NOT_SPILL,
+                                    ConsumeStatusWithId.ALL_ANY))
                     .addBufferToRelease(
                             subpartitionId,
                             // get all not released buffers.
                             spillingInfoProvider.getBuffersInOrder(
-                                    subpartitionId, SpillStatus.ALL, ConsumeStatus.ALL));
+                                    subpartitionId, SpillStatus.ALL, ConsumeStatusWithId.ALL_ANY));
         }
         return builder.build();
     }

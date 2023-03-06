@@ -54,6 +54,7 @@ import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ABS;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ACOS;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.AND;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_CONTAINS;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_DISTINCT;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ARRAY_ELEMENT;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ASCII;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.ASIN;
@@ -108,6 +109,7 @@ import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LEFT;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LESS_THAN;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LESS_THAN_OR_EQUAL;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LIKE;
+import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LISTAGG;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LN;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LOCATE;
 import static org.apache.flink.table.functions.BuiltInFunctionDefinitions.LOG;
@@ -469,6 +471,24 @@ public abstract class BaseExpressions<InType, OutType> {
     /** Returns the last value of field across all input values. */
     public OutType lastValue() {
         return toApiSpecificExpression(unresolvedCall(LAST_VALUE, toExpr()));
+    }
+
+    /**
+     * Concatenates the values of string expressions and places separator(,) values between them.
+     * The separator is not added at the end of string.
+     */
+    public OutType listAgg() {
+        return toApiSpecificExpression(unresolvedCall(LISTAGG, toExpr(), valueLiteral(",")));
+    }
+
+    /**
+     * Concatenates the values of string expressions and places separator values between them. The
+     * separator is not added at the end of string. The default value of separator is ‘,’.
+     *
+     * @param separator string containing the character
+     */
+    public OutType listAgg(String separator) {
+        return toApiSpecificExpression(unresolvedCall(LISTAGG, toExpr(), valueLiteral(separator)));
     }
 
     /** Returns the population standard deviation of an expression (the square root of varPop()). */
@@ -1328,6 +1348,15 @@ public abstract class BaseExpressions<InType, OutType> {
     public OutType arrayContains(InType needle) {
         return toApiSpecificExpression(
                 unresolvedCall(ARRAY_CONTAINS, toExpr(), objectToExpression(needle)));
+    }
+
+    /**
+     * Returns an array with unique elements.
+     *
+     * <p>If the array itself is null, the function will return null. Keeps ordering of elements.
+     */
+    public OutType arrayDistinct() {
+        return toApiSpecificExpression(unresolvedCall(ARRAY_DISTINCT, toExpr()));
     }
 
     // Time definition

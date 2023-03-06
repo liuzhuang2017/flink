@@ -175,10 +175,12 @@ public class StreamExecPythonGroupAggregate extends StreamExecAggregateBase {
         PythonAggregateFunctionInfo[] pythonFunctionInfos = aggInfosAndDataViewSpecs.f0;
         DataViewSpec[][] dataViewSpecs = aggInfosAndDataViewSpecs.f1;
         Configuration pythonConfig =
-                CommonPythonUtil.extractPythonConfiguration(planner.getExecEnv(), config);
+                CommonPythonUtil.extractPythonConfiguration(
+                        planner.getExecEnv(), config, planner.getFlinkContext().getClassLoader());
         final OneInputStreamOperator<RowData, RowData> operator =
                 getPythonAggregateFunctionOperator(
                         pythonConfig,
+                        planner.getFlinkContext().getClassLoader(),
                         inputRowType,
                         InternalTypeInfo.of(getOutputType()).toRowType(),
                         pythonFunctionInfos,
@@ -194,9 +196,11 @@ public class StreamExecPythonGroupAggregate extends StreamExecAggregateBase {
                         createTransformationMeta(PYTHON_GROUP_AGGREGATE_TRANSFORMATION, config),
                         operator,
                         InternalTypeInfo.of(getOutputType()),
-                        inputTransform.getParallelism());
+                        inputTransform.getParallelism(),
+                        false);
 
-        if (CommonPythonUtil.isPythonWorkerUsingManagedMemory(pythonConfig)) {
+        if (CommonPythonUtil.isPythonWorkerUsingManagedMemory(
+                pythonConfig, planner.getFlinkContext().getClassLoader())) {
             transform.declareManagedMemoryUseCaseAtSlotScope(ManagedMemoryUseCase.PYTHON);
         }
 
@@ -214,6 +218,7 @@ public class StreamExecPythonGroupAggregate extends StreamExecAggregateBase {
     @SuppressWarnings("unchecked")
     private OneInputStreamOperator<RowData, RowData> getPythonAggregateFunctionOperator(
             Configuration config,
+            ClassLoader classLoader,
             RowType inputType,
             RowType outputType,
             PythonAggregateFunctionInfo[] aggregateFunctions,
@@ -222,7 +227,8 @@ public class StreamExecPythonGroupAggregate extends StreamExecAggregateBase {
             long maxIdleStateRetentionTime,
             int indexOfCountStar,
             boolean countStarInserted) {
-        Class<?> clazz = CommonPythonUtil.loadClass(PYTHON_STREAM_AGGREAGTE_OPERATOR_NAME);
+        Class<?> clazz =
+                CommonPythonUtil.loadClass(PYTHON_STREAM_AGGREAGTE_OPERATOR_NAME, classLoader);
         try {
             Constructor<?> ctor =
                     clazz.getConstructor(

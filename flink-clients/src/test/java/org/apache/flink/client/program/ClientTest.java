@@ -54,9 +54,7 @@ import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.testutils.InternalMiniClusterExtension;
 import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.util.FlinkRuntimeException;
-import org.apache.flink.util.NetUtils;
 
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
@@ -88,8 +86,6 @@ class ClientTest {
 
     private Plan plan;
 
-    private NetUtils.Port port;
-
     private Configuration config;
 
     private static final String TEST_EXECUTOR_NAME = "test_executor";
@@ -108,18 +104,9 @@ class ClientTest {
 
         config = new Configuration();
         config.setString(JobManagerOptions.ADDRESS, "localhost");
-        port = NetUtils.getAvailablePort();
-        config.setInteger(JobManagerOptions.PORT, port.getPort());
 
         config.set(
                 AkkaOptions.ASK_TIMEOUT_DURATION, AkkaOptions.ASK_TIMEOUT_DURATION.defaultValue());
-    }
-
-    @AfterEach
-    void tearDown() throws Exception {
-        if (port != null) {
-            port.close();
-        }
     }
 
     private Configuration fromPackagedProgram(
@@ -281,7 +268,12 @@ class ClientTest {
     void shouldSubmitToJobClient() {
         final ClusterClient<?> clusterClient =
                 new MiniClusterClient(new Configuration(), MINI_CLUSTER_RESOURCE.getMiniCluster());
-        JobGraph jobGraph = FlinkPipelineTranslationUtil.getJobGraph(plan, new Configuration(), 1);
+        JobGraph jobGraph =
+                FlinkPipelineTranslationUtil.getJobGraph(
+                        Thread.currentThread().getContextClassLoader(),
+                        plan,
+                        new Configuration(),
+                        1);
 
         jobGraph.addJars(Collections.emptyList());
         jobGraph.setClasspaths(Collections.emptyList());
@@ -373,7 +365,7 @@ class ClientTest {
                             .build();
 
             final Configuration configuration = fromPackagedProgram(program, 1, false);
-            configuration.set(DeploymentOptions.ALLOW_CLIENT_JOB_CONFIGURATIONS, false);
+            configuration.set(DeploymentOptions.PROGRAM_CONFIG_ENABLED, false);
 
             assertThatThrownBy(
                             () ->
@@ -516,7 +508,8 @@ class ClientTest {
                     return (pipeline, config, classLoader) -> {
                         final int parallelism = config.getInteger(CoreOptions.DEFAULT_PARALLELISM);
                         final JobGraph jobGraph =
-                                FlinkPipelineTranslationUtil.getJobGraph(plan, config, parallelism);
+                                FlinkPipelineTranslationUtil.getJobGraph(
+                                        classLoader, plan, config, parallelism);
 
                         final ExecutionConfigAccessor accessor =
                                 ExecutionConfigAccessor.fromConfiguration(config);

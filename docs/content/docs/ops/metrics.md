@@ -331,7 +331,7 @@ class MyMapper extends RichMapFunction[Long, Long] {
   @transient private var histogram: Histogram = _
 
   override def open(config: Configuration): Unit = {
-    com.codahale.metrics.Histogram dropwizardHistogram =
+    val dropwizardHistogram =
       new com.codahale.metrics.Histogram(new SlidingWindowReservoir(500))
         
     histogram = getRuntimeContext()
@@ -557,13 +557,13 @@ Each of these keys expect a format string that may contain constants (e.g. "task
 - `metrics.scope.jm`
   - Default: &lt;host&gt;.jobmanager
   - Applied to all metrics that were scoped to a job manager.
-- `metrics.scope.jm.job`
+- `metrics.scope.jm-job`
   - Default: &lt;host&gt;.jobmanager.&lt;job_name&gt;
   - Applied to all metrics that were scoped to a job manager and job.
 - `metrics.scope.tm`
   - Default: &lt;host&gt;.taskmanager.&lt;tm_id&gt;
   - Applied to all metrics that were scoped to a task manager.
-- `metrics.scope.tm.job`
+- `metrics.scope.tm-job`
   - Default: &lt;host&gt;.taskmanager.&lt;tm_id&gt;.&lt;job_name&gt;
   - Applied to all metrics that were scoped to a task manager and job.
 - `metrics.scope.task`
@@ -1282,7 +1282,7 @@ Note that for failed checkpoints, metrics are updated on a best efforts basis an
   </thead>
   <tbody>
     <tr>
-      <th rowspan="9"><strong>Job (only available on JobManager)</strong></th>
+      <th rowspan="10"><strong>Job (only available on JobManager)</strong></th>
       <td>lastCheckpointDuration</td>
       <td>The time it took to complete the last checkpoint (in milliseconds).</td>
       <td>Gauge</td>
@@ -1290,6 +1290,11 @@ Note that for failed checkpoints, metrics are updated on a best efforts basis an
     <tr>
       <td>lastCheckpointSize</td>
       <td>The checkpointed size of the last checkpoint (in bytes), this metric could be different from lastCheckpointFullSize if incremental checkpoint or changelog is enabled.</td>
+      <td>Gauge</td>
+    </tr>
+    <tr>
+      <td>lastCompletedCheckpointId</td>
+      <td>The identifier of the last completed checkpoint.</td>
       <td>Gauge</td>
     </tr>
     <tr>
@@ -1551,7 +1556,7 @@ Note that the metrics are only available via reporters.
       <td>Gauge</td>
     </tr>
     <tr>
-      <th rowspan="7"><strong>Task/Operator</strong></th>
+      <th rowspan="8"><strong>Task/Operator</strong></th>
       <td>startedMaterialization</td>
       <td>The number of started materializations.</td>
       <td>Counter</td>
@@ -1565,6 +1570,11 @@ Note that the metrics are only available via reporters.
       <td>failedMaterialization</td>
       <td>The number of failed materializations.</td>
       <td>Counter</td>
+    </tr>
+    <tr>
+      <td>lastDurationOfMaterialization</td>
+      <td>The duration of the last materialization (in milliseconds).</td>
+      <td>Gauge</td>
     </tr>
     <tr>
       <td>lastFullSizeOfMaterialization</td>
@@ -2105,6 +2115,35 @@ logged by `SystemResourcesMetricsInitializer` during the startup.
   </tbody>
 </table>
 
+### Speculative Execution
+
+Metrics below can be used to measure the effectiveness of speculative execution.
+
+<table class="table table-bordered">
+  <thead>
+    <tr>
+      <th class="text-left" style="width: 18%">Scope</th>
+      <th class="text-left" style="width: 26%">Metrics</th>
+      <th class="text-left" style="width: 48%">Description</th>
+      <th class="text-left" style="width: 8%">Type</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th rowspan="2"><strong>Job (only available on JobManager)</strong></th>
+      <td>numSlowExecutionVertices</td>
+      <td>Number of slow execution vertices at the moment.</td>
+      <td>Gauge</td>
+    </tr>
+    <tr>
+      <td>numEffectiveSpeculativeExecutions</td>
+      <td>Number of effective speculative execution attempts, i.e. speculative execution attempts which 
+      finish earlier than their corresponding original attempts.</td>
+      <td>Counter</td>
+    </tr>
+  </tbody>
+</table>
+
 ## End-to-End latency tracking
 
 Flink allows to track the latency of records travelling through the system. This feature is disabled by default.
@@ -2175,7 +2214,7 @@ Request metrics aggregated over a subset of all entities of the respective type:
   - `/jobs/metrics?jobs=D,E,F`
   - `/jobs/<jobid>/vertices/<vertexid>/subtasks/metrics?subtask=1,2,3`
 
-<span class="label label-danger">Warning</span> Metric names can contain special characters that you need to be escape when querying metrics.
+<span class="label label-danger">Warning</span> Metric names can contain special characters that you need to escape when querying metrics.
 For example, "`a_+_b`" would be escaped to "`a_%2B_b`".
 
 List of characters that should be escaped:

@@ -164,10 +164,9 @@ public class StreamConfig implements Serializable {
         FutureUtils.combineAll(chainedTaskFutures.values())
                 .thenAcceptAsync(
                         chainedConfigs -> {
-                            // Serialize all the objects to config.
-                            serializeAllConfigs();
-
                             try {
+                                // Serialize all the objects to config.
+                                serializeAllConfigs();
                                 InstantiationUtil.writeObjectToConfig(
                                         chainedConfigs.stream()
                                                 .collect(
@@ -176,12 +175,10 @@ public class StreamConfig implements Serializable {
                                                                 Function.identity())),
                                         this.config,
                                         CHAINED_TASK_CONFIG);
-                            } catch (IOException e) {
-                                throw new StreamTaskException(
-                                        "Could not serialize object for key chained task config.",
-                                        e);
+                                serializationFuture.complete(this);
+                            } catch (Throwable throwable) {
+                                serializationFuture.completeExceptionally(throwable);
                             }
-                            serializationFuture.complete(this);
                         },
                         ioExecutor);
         return serializationFuture;
@@ -520,6 +517,28 @@ public class StreamConfig implements Serializable {
     public void setAlignedCheckpointTimeout(Duration alignedCheckpointTimeout) {
         config.set(
                 ExecutionCheckpointingOptions.ALIGNED_CHECKPOINT_TIMEOUT, alignedCheckpointTimeout);
+    }
+
+    public void setMaxConcurrentCheckpoints(int maxConcurrentCheckpoints) {
+        config.setInteger(
+                ExecutionCheckpointingOptions.MAX_CONCURRENT_CHECKPOINTS, maxConcurrentCheckpoints);
+    }
+
+    public int getMaxConcurrentCheckpoints() {
+        return config.getInteger(
+                ExecutionCheckpointingOptions.MAX_CONCURRENT_CHECKPOINTS,
+                ExecutionCheckpointingOptions.MAX_CONCURRENT_CHECKPOINTS.defaultValue());
+    }
+
+    public int getMaxSubtasksPerChannelStateFile() {
+        return config.get(
+                ExecutionCheckpointingOptions.UNALIGNED_MAX_SUBTASKS_PER_CHANNEL_STATE_FILE);
+    }
+
+    public void setMaxSubtasksPerChannelStateFile(int maxSubtasksPerChannelStateFile) {
+        config.set(
+                ExecutionCheckpointingOptions.UNALIGNED_MAX_SUBTASKS_PER_CHANNEL_STATE_FILE,
+                maxSubtasksPerChannelStateFile);
     }
 
     /**

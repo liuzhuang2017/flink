@@ -87,8 +87,7 @@ public class MetricNames {
     public static final String DEBLOATED_BUFFER_SIZE = "debloatedBufferSize";
 
     // FLIP-33 sink
-    // deprecated use NUM_RECORDS_SEND_ERRORS instead.
-    @Deprecated public static final String NUM_RECORDS_OUT_ERRORS = "numRecordsOutErrors";
+    public static final String NUM_RECORDS_OUT_ERRORS = "numRecordsOutErrors";
     public static final String NUM_RECORDS_SEND_ERRORS = "numRecordsSendErrors";
     public static final String CURRENT_SEND_TIME = "currentSendTime";
     public static final String NUM_RECORDS_SEND = "numRecordsSend";
@@ -123,4 +122,7 @@ public class MetricNames {
     public static final String LATEST_LOAD_TIME = "latestLoadTime";
     public static final String NUM_CACHED_RECORDS = "numCachedRecords";
     public static final String NUM_CACHED_BYTES = "numCachedBytes";
+
+    // FLIP-27 for split enumerator
+    public static final String UNASSIGNED_SPLITS = "unassignedSplits";
 }

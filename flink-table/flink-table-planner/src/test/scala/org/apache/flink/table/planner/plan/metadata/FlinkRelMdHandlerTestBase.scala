@@ -973,7 +973,8 @@ class FlinkRelMdHandlerTestBase {
       false,
       Seq(Integer.valueOf(3)).toList,
       -1,
-      RelCollationImpl.of(),
+      null,
+      RelCollations.of(),
       relDataType,
       ""
     )
@@ -1162,6 +1163,7 @@ class FlinkRelMdHandlerTestBase {
       studentBatchScan.getRowType,
       Array(3),
       auxGrouping = Array(),
+      true,
       aggCallToAggFunction)
 
     val batchExchange1 = new BatchPhysicalExchange(
@@ -1325,6 +1327,7 @@ class FlinkRelMdHandlerTestBase {
         false,
         List(Integer.valueOf(argIndex)),
         filterArg,
+        null,
         RelCollations.EMPTY,
         1,
         calcOnStudentScan,
@@ -1426,6 +1429,7 @@ class FlinkRelMdHandlerTestBase {
       calcOnStudentScan.getRowType,
       Array(3),
       auxGrouping = Array(),
+      true,
       aggCallToAggFunction)
 
     val batchExchange1 = new BatchPhysicalExchange(
@@ -1578,6 +1582,7 @@ class FlinkRelMdHandlerTestBase {
       studentBatchScan.getRowType,
       Array(0),
       auxGrouping = Array(1, 4),
+      true,
       aggCallToAggFunction)
 
     val hash0 = FlinkRelDistribution.hash(Array(0), requireStrict = true)
@@ -1684,8 +1689,11 @@ class FlinkRelMdHandlerTestBase {
         new SqlCountAggFunction("COUNT"),
         false,
         false,
+        false,
         List[Integer](3),
         -1,
+        null,
+        RelCollations.EMPTY,
         2,
         project,
         null,
@@ -1851,8 +1859,11 @@ class FlinkRelMdHandlerTestBase {
         new SqlCountAggFunction("COUNT"),
         false,
         false,
+        false,
         List[Integer](0),
         -1,
+        null,
+        RelCollations.EMPTY,
         1,
         project,
         null,
@@ -2017,8 +2028,11 @@ class FlinkRelMdHandlerTestBase {
         FlinkSqlOperatorTable.AUXILIARY_GROUP,
         false,
         false,
+        false,
         List[Integer](1),
         -1,
+        null,
+        RelCollations.EMPTY,
         1,
         project,
         null,
@@ -2027,8 +2041,11 @@ class FlinkRelMdHandlerTestBase {
         new SqlCountAggFunction("COUNT"),
         false,
         false,
+        false,
         List[Integer](3),
         -1,
+        null,
+        RelCollations.EMPTY,
         2,
         project,
         null,
@@ -2370,9 +2387,9 @@ class FlinkRelMdHandlerTestBase {
     new Window.Group(
       ImmutableBitSet.of(0),
       true,
-      RexWindowBound.create(SqlWindow.createUnboundedPreceding(new SqlParserPos(0, 0)), null),
-      RexWindowBound.create(SqlWindow.createCurrentRow(new SqlParserPos(0, 0)), null),
-      RelCollationImpl.of(
+      RexWindowBounds.create(SqlWindow.createUnboundedPreceding(new SqlParserPos(0, 0)), null),
+      RexWindowBounds.create(SqlWindow.createCurrentRow(new SqlParserPos(0, 0)), null),
+      RelCollations.of(
         new RelFieldCollation(
           1,
           RelFieldCollation.Direction.ASCENDING,
@@ -2383,6 +2400,7 @@ class FlinkRelMdHandlerTestBase {
           longType,
           ImmutableList.of[RexNode](),
           0,
+          false,
           false
         )
       )
@@ -2502,9 +2520,9 @@ class FlinkRelMdHandlerTestBase {
       new Window.Group(
         ImmutableBitSet.of(5),
         true,
-        RexWindowBound.create(SqlWindow.createUnboundedPreceding(new SqlParserPos(0, 0)), null),
-        RexWindowBound.create(SqlWindow.createCurrentRow(new SqlParserPos(0, 0)), null),
-        RelCollationImpl.of(
+        RexWindowBounds.create(SqlWindow.createUnboundedPreceding(new SqlParserPos(0, 0)), null),
+        RexWindowBounds.create(SqlWindow.createCurrentRow(new SqlParserPos(0, 0)), null),
+        RelCollations.of(
           new RelFieldCollation(
             1,
             RelFieldCollation.Direction.ASCENDING,
@@ -2515,6 +2533,7 @@ class FlinkRelMdHandlerTestBase {
             longType,
             ImmutableList.of[RexNode](),
             0,
+            false,
             false
           )
         )
@@ -2522,9 +2541,9 @@ class FlinkRelMdHandlerTestBase {
       new Window.Group(
         ImmutableBitSet.of(5),
         false,
-        RexWindowBound.create(SqlWindow.createUnboundedPreceding(new SqlParserPos(4, 15)), null),
-        RexWindowBound.create(SqlWindow.createCurrentRow(new SqlParserPos(0, 0)), null),
-        RelCollationImpl.of(
+        RexWindowBounds.create(SqlWindow.createUnboundedPreceding(new SqlParserPos(4, 15)), null),
+        RexWindowBounds.create(SqlWindow.createCurrentRow(new SqlParserPos(0, 0)), null),
+        RelCollations.of(
           new RelFieldCollation(
             2,
             RelFieldCollation.Direction.ASCENDING,
@@ -2535,6 +2554,7 @@ class FlinkRelMdHandlerTestBase {
             longType,
             ImmutableList.of[RexNode](),
             1,
+            false,
             false
           ),
           new Window.RexWinAggCall(
@@ -2542,6 +2562,7 @@ class FlinkRelMdHandlerTestBase {
             longType,
             ImmutableList.of[RexNode](),
             2,
+            false,
             false
           ),
           new Window.RexWinAggCall(
@@ -2549,6 +2570,7 @@ class FlinkRelMdHandlerTestBase {
             longType,
             util.Arrays.asList(new RexInputRef(2, longType)),
             3,
+            false,
             false
           ),
           new Window.RexWinAggCall(
@@ -2556,6 +2578,7 @@ class FlinkRelMdHandlerTestBase {
             doubleType,
             util.Arrays.asList(new RexInputRef(2, doubleType)),
             4,
+            false,
             false
           )
         )
@@ -2563,8 +2586,8 @@ class FlinkRelMdHandlerTestBase {
       new Window.Group(
         ImmutableBitSet.of(),
         false,
-        RexWindowBound.create(SqlWindow.createUnboundedPreceding(new SqlParserPos(7, 19)), null),
-        RexWindowBound.create(SqlWindow.createUnboundedFollowing(new SqlParserPos(0, 0)), null),
+        RexWindowBounds.create(SqlWindow.createUnboundedPreceding(new SqlParserPos(7, 19)), null),
+        RexWindowBounds.create(SqlWindow.createUnboundedFollowing(new SqlParserPos(0, 0)), null),
         RelCollations.EMPTY,
         ImmutableList.of(
           new Window.RexWinAggCall(
@@ -2572,6 +2595,7 @@ class FlinkRelMdHandlerTestBase {
             doubleType,
             util.Arrays.asList(new RexInputRef(2, doubleType)),
             5,
+            false,
             false
           ),
           new Window.RexWinAggCall(
@@ -2579,6 +2603,7 @@ class FlinkRelMdHandlerTestBase {
             longType,
             util.Arrays.asList(new RexInputRef(0, longType)),
             6,
+            false,
             false
           )
         )

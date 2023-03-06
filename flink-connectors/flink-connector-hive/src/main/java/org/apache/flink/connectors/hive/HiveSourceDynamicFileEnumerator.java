@@ -32,6 +32,7 @@ import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.data.util.DataFormatConverters.LocalDateConverter;
 import org.apache.flink.table.data.util.DataFormatConverters.LocalDateTimeConverter;
+import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.util.Preconditions;
@@ -115,7 +116,7 @@ public class HiveSourceDynamicFileEnumerator implements DynamicFileEnumerator {
         Preconditions.checkArgument(rowType.getFieldCount() == dynamicFilterPartitionKeys.size());
         for (HiveTablePartition partition : allPartitions) {
             RowData partitionRow = createRowData(rowType, partition.getPartitionSpec());
-            if (data.contains(partitionRow)) {
+            if (partitionRow != null && data.contains(partitionRow)) {
                 finalPartitions.add(partition);
             }
         }
@@ -131,6 +132,7 @@ public class HiveSourceDynamicFileEnumerator implements DynamicFileEnumerator {
         GenericRowData rowData = new GenericRowData(rowType.getFieldCount());
         for (int i = 0; i < rowType.getFieldCount(); ++i) {
             String value = partitionSpec.get(dynamicFilterPartitionKeys.get(i));
+            LogicalType fieldType = rowType.getTypeAt(i);
             Object convertedValue =
                     HivePartitionUtils.restorePartitionValueFromType(
                             hiveShim, value, rowType.getTypeAt(i), defaultPartitionName);
@@ -159,6 +161,9 @@ public class HiveSourceDynamicFileEnumerator implements DynamicFileEnumerator {
                     throw new UnsupportedOperationException(
                             "Unsupported type for dynamic filtering:" + rowType.getTypeAt(i));
             }
+            if (!fieldType.isNullable() && convertedValue == null) {
+                return null;
+            }
             rowData.setField(i, convertedValue);
         }
         return rowData;
@@ -184,19 +189,21 @@ public class HiveSourceDynamicFileEnumerator implements DynamicFileEnumerator {
 
         private final String table;
         private final List<String> dynamicFilterPartitionKeys;
-        private final List<HiveTablePartition> partitions;
+        // The binary HiveTablePartition list, serialize it manually at compile time to avoid
+        // deserializing it in TaskManager during runtime.
+        private final List<byte[]> partitionBytes;
         private final String hiveVersion;
         private final JobConfWrapper jobConfWrapper;
 
         public Provider(
                 String table,
                 List<String> dynamicFilterPartitionKeys,
-                List<HiveTablePartition> partitions,
+                List<byte[]> partitionBytes,
                 String hiveVersion,
                 JobConfWrapper jobConfWrapper) {
             this.table = checkNotNull(table);
             this.dynamicFilterPartitionKeys = checkNotNull(dynamicFilterPartitionKeys);
-            this.partitions = checkNotNull(partitions);
+            this.partitionBytes = checkNotNull(partitionBytes);
             this.hiveVersion = checkNotNull(hiveVersion);
             this.jobConfWrapper = checkNotNull(jobConfWrapper);
         }
@@ -206,7 +213,7 @@ public class HiveSourceDynamicFileEnumerator implements DynamicFileEnumerator {
             return new HiveSourceDynamicFileEnumerator(
                     table,
                     dynamicFilterPartitionKeys,
-                    partitions,
+                    HivePartitionUtils.deserializeHiveTablePartition(partitionBytes),
                     hiveVersion,
                     jobConfWrapper.conf());
         }

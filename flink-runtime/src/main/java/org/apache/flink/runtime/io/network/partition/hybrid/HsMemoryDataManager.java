@@ -24,6 +24,8 @@ import org.apache.flink.runtime.io.network.buffer.BufferBuilder;
 import org.apache.flink.runtime.io.network.buffer.BufferCompressor;
 import org.apache.flink.runtime.io.network.buffer.BufferPool;
 import org.apache.flink.runtime.io.network.partition.hybrid.HsSpillingStrategy.Decision;
+import org.apache.flink.util.Preconditions;
+import org.apache.flink.util.concurrent.ExecutorThreadFactory;
 import org.apache.flink.util.concurrent.FutureUtils;
 import org.apache.flink.util.function.SupplierWithException;
 
@@ -34,12 +36,16 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
@@ -68,8 +74,23 @@ public class HsMemoryDataManager implements HsSpillingInfoProvider, HsMemoryData
 
     private final AtomicInteger numUnSpillBuffers = new AtomicInteger(0);
 
-    private final Map<Integer, HsSubpartitionViewInternalOperations> subpartitionViewOperationsMap =
-            new ConcurrentHashMap<>();
+    /**
+     * Each element of the list is all views of the subpartition corresponding to its index, which
+     * are stored in the form of a map that maps consumer id to its subpartition view.
+     */
+    private final List<Map<HsConsumerId, HsSubpartitionConsumerInternalOperations>>
+            subpartitionViewOperationsMap;
+
+    /**
+     * Currently, it is only used to regularly check the actual size of local buffer pool (the size
+     * will change dynamically due to the redistribution of network buffers). When the size of the
+     * buffer pool changes, it attempts to trigger the spilling strategy.
+     */
+    private final ScheduledExecutorService poolSizeChecker =
+            Executors.newSingleThreadScheduledExecutor(
+                    new ExecutorThreadFactory("hybrid-shuffle-pool-size-checker-executor"));
+
+    private final AtomicInteger poolSize;
 
     public HsMemoryDataManager(
             int numSubpartitions,
@@ -78,11 +99,12 @@ public class HsMemoryDataManager implements HsSpillingInfoProvider, HsMemoryData
             HsSpillingStrategy spillStrategy,
             HsFileDataIndex fileDataIndex,
             Path dataFilePath,
-            BufferCompressor bufferCompressor)
+            BufferCompressor bufferCompressor,
+            long poolSizeCheckInterval)
             throws IOException {
         this.numSubpartitions = numSubpartitions;
         this.bufferPool = bufferPool;
-        this.spiller = new HsMemoryDataSpiller(dataFilePath, bufferCompressor);
+        this.spiller = new HsMemoryDataSpiller(dataFilePath);
         this.spillStrategy = spillStrategy;
         this.fileDataIndex = fileDataIndex;
         this.subpartitionMemoryDataManagers = new HsSubpartitionMemoryDataManager[numSubpartitions];
@@ -90,10 +112,33 @@ public class HsMemoryDataManager implements HsSpillingInfoProvider, HsMemoryData
         ReadWriteLock readWriteLock = new ReentrantReadWriteLock(true);
         this.lock = readWriteLock.writeLock();
 
+        this.subpartitionViewOperationsMap = new ArrayList<>(numSubpartitions);
         for (int subpartitionId = 0; subpartitionId < numSubpartitions; ++subpartitionId) {
             subpartitionMemoryDataManagers[subpartitionId] =
                     new HsSubpartitionMemoryDataManager(
-                            subpartitionId, bufferSize, readWriteLock.readLock(), this);
+                            subpartitionId,
+                            bufferSize,
+                            readWriteLock.readLock(),
+                            bufferCompressor,
+                            this);
+            subpartitionViewOperationsMap.add(new ConcurrentHashMap<>());
+        }
+
+        poolSize = new AtomicInteger(this.bufferPool.getNumBuffers());
+
+        if (poolSizeCheckInterval > 0) {
+            poolSizeChecker.scheduleAtFixedRate(
+                    () -> {
+                        int newSize = this.bufferPool.getNumBuffers();
+                        int oldSize = poolSize.getAndSet(newSize);
+                        if (oldSize > newSize) {
+                            // pass Optional.empty to trigger global decision.
+                            handleDecision(Optional.empty());
+                        }
+                    },
+                    poolSizeCheckInterval,
+                    poolSizeCheckInterval,
+                    TimeUnit.MILLISECONDS);
         }
     }
 
@@ -119,35 +164,34 @@ public class HsMemoryDataManager implements HsSpillingInfoProvider, HsMemoryData
     }
 
     /**
-     * Register {@link HsSubpartitionViewInternalOperations} to {@link
+     * Register {@link HsSubpartitionConsumerInternalOperations} to {@link
      * #subpartitionViewOperationsMap}. It is used to obtain the consumption progress of the
      * subpartition.
      */
-    public HsDataView registerSubpartitionView(
-            int subpartitionId, HsSubpartitionViewInternalOperations viewOperations) {
-        HsSubpartitionViewInternalOperations oldView =
-                subpartitionViewOperationsMap.put(subpartitionId, viewOperations);
-        if (oldView != null) {
-            LOG.debug(
-                    "subpartition : {} register subpartition view will replace old view. ",
-                    subpartitionId);
-        }
-        return getSubpartitionMemoryDataManager(subpartitionId);
-    }
-
-    /** Close this {@link HsMemoryDataManager}, it means no data can append to memory. */
-    public void close() {
-        Decision decision = callWithLock(() -> spillStrategy.onResultPartitionClosed(this));
-        handleDecision(Optional.of(decision));
-        spiller.close();
+    public HsDataView registerNewConsumer(
+            int subpartitionId,
+            HsConsumerId consumerId,
+            HsSubpartitionConsumerInternalOperations viewOperations) {
+        HsSubpartitionConsumerInternalOperations oldView =
+                subpartitionViewOperationsMap.get(subpartitionId).put(consumerId, viewOperations);
+        Preconditions.checkState(
+                oldView == null, "Each subpartition view should have unique consumerId.");
+        return getSubpartitionMemoryDataManager(subpartitionId).registerNewConsumer(consumerId);
     }
 
     /**
-     * Release this {@link HsMemoryDataManager}, it means all memory taken by this class will
-     * recycle.
+     * Close this {@link HsMemoryDataManager}, it means no data can append to memory and all buffer
+     * taken by this class will recycle.
      */
-    public void release() {
-        spiller.release();
+    public void close() {
+        spillAndReleaseAllData();
+        spiller.close();
+        poolSizeChecker.shutdown();
+    }
+
+    private void spillAndReleaseAllData() {
+        Decision decision = callWithLock(() -> spillStrategy.onResultPartitionClosed(this));
+        handleDecision(Optional.of(decision));
     }
 
     public void setOutputMetrics(HsOutputMetrics metrics) {
@@ -164,7 +208,7 @@ public class HsMemoryDataManager implements HsSpillingInfoProvider, HsMemoryData
 
     @Override
     public int getPoolSize() {
-        return bufferPool.getNumBuffers();
+        return poolSize.get();
     }
 
     @Override
@@ -185,19 +229,20 @@ public class HsMemoryDataManager implements HsSpillingInfoProvider, HsMemoryData
     // Write lock should be acquired before invoke this method.
     @Override
     public Deque<BufferIndexAndChannel> getBuffersInOrder(
-            int subpartitionId, SpillStatus spillStatus, ConsumeStatus consumeStatus) {
+            int subpartitionId, SpillStatus spillStatus, ConsumeStatusWithId consumeStatusWithId) {
         HsSubpartitionMemoryDataManager targetSubpartitionDataManager =
                 getSubpartitionMemoryDataManager(subpartitionId);
-        return targetSubpartitionDataManager.getBuffersSatisfyStatus(spillStatus, consumeStatus);
+        return targetSubpartitionDataManager.getBuffersSatisfyStatus(
+                spillStatus, consumeStatusWithId);
     }
 
     // Write lock should be acquired before invoke this method.
     @Override
-    public List<Integer> getNextBufferIndexToConsume() {
+    public List<Integer> getNextBufferIndexToConsume(HsConsumerId consumerId) {
         ArrayList<Integer> consumeIndexes = new ArrayList<>(numSubpartitions);
         for (int channel = 0; channel < numSubpartitions; channel++) {
-            HsSubpartitionViewInternalOperations viewOperation =
-                    subpartitionViewOperationsMap.get(channel);
+            HsSubpartitionConsumerInternalOperations viewOperation =
+                    subpartitionViewOperationsMap.get(channel).get(consumerId);
             // Access consuming offset without lock to prevent deadlock.
             // A consuming thread may being blocked on the memory data manager lock, while holding
             // the viewOperation lock.
@@ -212,8 +257,8 @@ public class HsMemoryDataManager implements HsSpillingInfoProvider, HsMemoryData
     // ------------------------------------
 
     @Override
-    public void markBufferReadableFromFile(int subpartitionId, int bufferIndex) {
-        fileDataIndex.markBufferReadable(subpartitionId, bufferIndex);
+    public void markBufferReleasedFromFile(int subpartitionId, int bufferIndex) {
+        fileDataIndex.markBufferReleased(subpartitionId, bufferIndex);
     }
 
     @Override
@@ -236,17 +281,28 @@ public class HsMemoryDataManager implements HsSpillingInfoProvider, HsMemoryData
     @Override
     public void onBufferFinished() {
         Optional<Decision> decision =
-                spillStrategy.onBufferFinished(numUnSpillBuffers.incrementAndGet());
+                spillStrategy.onBufferFinished(numUnSpillBuffers.incrementAndGet(), getPoolSize());
         handleDecision(decision);
     }
 
     @Override
-    public void onDataAvailable(int subpartitionId) {
-        HsSubpartitionViewInternalOperations subpartitionViewInternalOperations =
+    public void onDataAvailable(int subpartitionId, Collection<HsConsumerId> consumerIds) {
+        Map<HsConsumerId, HsSubpartitionConsumerInternalOperations> consumerViewMap =
                 subpartitionViewOperationsMap.get(subpartitionId);
-        if (subpartitionViewInternalOperations != null) {
-            subpartitionViewInternalOperations.notifyDataAvailable();
-        }
+        consumerIds.forEach(
+                consumerId -> {
+                    HsSubpartitionConsumerInternalOperations consumerView =
+                            consumerViewMap.get(consumerId);
+                    if (consumerView != null) {
+                        consumerView.notifyDataAvailable();
+                    }
+                });
+    }
+
+    @Override
+    public void onConsumerReleased(int subpartitionId, HsConsumerId consumerId) {
+        subpartitionViewOperationsMap.get(subpartitionId).remove(consumerId);
+        getSubpartitionMemoryDataManager(subpartitionId).releaseConsumer(consumerId);
     }
 
     // ------------------------------------

@@ -123,11 +123,11 @@ public class SavepointWriterITCase extends AbstractTestBase {
 
         SavepointWriter writer =
                 backend == null
-                        ? SavepointWriter.newSavepoint(128)
-                        : SavepointWriter.newSavepoint(backend, 128);
+                        ? SavepointWriter.newSavepoint(env, 128)
+                        : SavepointWriter.newSavepoint(env, backend, 128);
 
-        writer.withOperator(ACCOUNT_UID, transformation)
-                .withOperator(CURRENCY_UID, broadcastTransformation)
+        writer.withOperator(OperatorIdentifier.forUid(ACCOUNT_UID), transformation)
+                .withOperator(getUidHashFromUid(CURRENCY_UID), broadcastTransformation)
                 .write(savepointPath);
 
         env.execute("Bootstrap");
@@ -175,11 +175,11 @@ public class SavepointWriterITCase extends AbstractTestBase {
 
         SavepointWriter writer =
                 backend == null
-                        ? SavepointWriter.fromExistingSavepoint(savepointPath)
-                        : SavepointWriter.fromExistingSavepoint(savepointPath, backend);
+                        ? SavepointWriter.fromExistingSavepoint(env, savepointPath)
+                        : SavepointWriter.fromExistingSavepoint(env, savepointPath, backend);
 
-        writer.removeOperator(CURRENCY_UID)
-                .withOperator(MODIFY_UID, transformation)
+        writer.removeOperator(OperatorIdentifier.forUid(CURRENCY_UID))
+                .withOperator(getUidHashFromUid(MODIFY_UID), transformation)
                 .write(modifyPath);
 
         env.execute("Modifying");
@@ -212,6 +212,11 @@ public class SavepointWriterITCase extends AbstractTestBase {
 
         assertThat(results).toIterable().hasSize(3);
         results.close();
+    }
+
+    private static OperatorIdentifier getUidHashFromUid(String uid) {
+        return OperatorIdentifier.forUidHash(
+                OperatorIdentifier.forUid(uid).getOperatorId().toHexString());
     }
 
     /** A simple pojo. */

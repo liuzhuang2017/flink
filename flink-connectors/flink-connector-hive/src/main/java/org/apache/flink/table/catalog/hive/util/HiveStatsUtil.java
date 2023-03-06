@@ -69,9 +69,10 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
@@ -312,18 +313,18 @@ public class HiveStatsUtil {
                                                                     p.getParameters())
                                                             .getRowCount()))
                             .collect(Collectors.toList());
-            Optional<TableStats> optionalTableStats =
-                    catalogTableStatistics.stream().reduce(TableStats::merge);
-            if (!optionalTableStats.isPresent()) {
-                return 0L;
+
+            Set<String> partitionKeys = getFieldNames(hiveTable.getPartitionKeys());
+            TableStats resultTableStats =
+                    catalogTableStatistics.stream()
+                            .reduce((s1, s2) -> s1.merge(s2, partitionKeys))
+                            .orElse(TableStats.UNKNOWN);
+            if (resultTableStats == TableStats.UNKNOWN || resultTableStats.getRowCount() < 0) {
+                return null;
             } else {
-                TableStats tableStats = optionalTableStats.get();
-                if (tableStats == TableStats.UNKNOWN || tableStats.getRowCount() < 0) {
-                    return null;
-                } else {
-                    return tableStats.getRowCount();
-                }
+                return resultTableStats.getRowCount();
             }
+
         } catch (Exception e) {
             LOG.warn(
                     "Can't list partition for table `{}.{}`, partition value {}.",
@@ -334,6 +335,15 @@ public class HiveStatsUtil {
         return null;
     }
 
+    /** Get field names from field schemas. */
+    private static Set<String> getFieldNames(List<FieldSchema> fieldSchemas) {
+        Set<String> names = new HashSet<>();
+        for (FieldSchema fs : fieldSchemas) {
+            names.add(fs.getName());
+        }
+        return names;
+    }
+
     public static CatalogTableStatistics createCatalogTableStatistics(
             Map<String, String> parameters) {
         return new CatalogTableStatistics(
@@ -341,6 +351,43 @@ public class HiveStatsUtil {
                 parsePositiveIntStat(parameters, StatsSetupConst.NUM_FILES),
                 parsePositiveLongStat(parameters, StatsSetupConst.TOTAL_SIZE),
                 parsePositiveLongStat(parameters, StatsSetupConst.RAW_DATA_SIZE));
+    }
+
+    /**
+     * Determine whether the table statistics changes.
+     *
+     * @param newTableStats new catalog table statistics.
+     * @param parameters original hive table statistics parameters.
+     * @return whether the table statistics changes
+     */
+    public static boolean statsChanged(
+            CatalogTableStatistics newTableStats, Map<String, String> parameters) {
+        return newTableStats.getRowCount()
+                        != parsePositiveLongStat(parameters, StatsSetupConst.ROW_COUNT)
+                || newTableStats.getTotalSize()
+                        != parsePositiveLongStat(parameters, StatsSetupConst.TOTAL_SIZE)
+                || newTableStats.getFileCount()
+                        != parsePositiveIntStat(parameters, StatsSetupConst.NUM_FILES)
+                || newTableStats.getRawDataSize()
+                        != parsePositiveLongStat(parameters, StatsSetupConst.RAW_DATA_SIZE);
+    }
+
+    /**
+     * Determine whether the stats change.
+     *
+     * @param newStats the new table statistics parameters
+     * @param oldStats the old table statistics parameters
+     * @return whether the stats change
+     */
+    public static boolean tableStatsChanged(
+            Map<String, String> newStats, Map<String, String> oldStats) {
+        return statsChanged(
+                new CatalogTableStatistics(
+                        parsePositiveLongStat(newStats, StatsSetupConst.ROW_COUNT),
+                        parsePositiveIntStat(newStats, StatsSetupConst.NUM_FILES),
+                        parsePositiveLongStat(newStats, StatsSetupConst.TOTAL_SIZE),
+                        parsePositiveLongStat(newStats, StatsSetupConst.RAW_DATA_SIZE)),
+                oldStats);
     }
 
     /**
@@ -385,6 +432,21 @@ public class HiveStatsUtil {
                         false, hivePartition.getDbName(), hivePartition.getTableName());
         desc.setPartName(partName);
         return createHiveColumnStatistics(colStats, hivePartition.getSd(), desc, hiveVersion);
+    }
+
+    /**
+     * Update original table statistics parameters.
+     *
+     * @param newTableStats new catalog table statistics.
+     * @param parameters original hive table statistics parameters.
+     */
+    public static void updateStats(
+            CatalogTableStatistics newTableStats, Map<String, String> parameters) {
+        parameters.put(StatsSetupConst.ROW_COUNT, String.valueOf(newTableStats.getRowCount()));
+        parameters.put(StatsSetupConst.TOTAL_SIZE, String.valueOf(newTableStats.getTotalSize()));
+        parameters.put(StatsSetupConst.NUM_FILES, String.valueOf(newTableStats.getFileCount()));
+        parameters.put(
+                StatsSetupConst.RAW_DATA_SIZE, String.valueOf(newTableStats.getRawDataSize()));
     }
 
     private static ColumnStatistics createHiveColumnStatistics(

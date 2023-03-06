@@ -23,10 +23,14 @@ import org.apache.flink.table.planner.plan.rules.logical.WrapJsonAggFunctionArgu
 import org.apache.flink.table.planner.plan.schema.FlinkPreparingTableBase;
 
 import org.apache.calcite.plan.RelOptTable;
+import org.apache.calcite.rel.BiRel;
 import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.RelShuttleImpl;
 import org.apache.calcite.rel.hint.Hintable;
 import org.apache.calcite.rel.hint.RelHint;
+import org.apache.calcite.rel.logical.LogicalCorrelate;
 import org.apache.calcite.rel.logical.LogicalFilter;
+import org.apache.calcite.rel.logical.LogicalJoin;
 import org.apache.calcite.rel.logical.LogicalProject;
 import org.apache.calcite.rel.logical.LogicalSnapshot;
 import org.apache.commons.lang3.StringUtils;
@@ -34,8 +38,10 @@ import org.apache.commons.lang3.StringUtils;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 /** Utility class for Flink hints. */
@@ -110,7 +116,6 @@ public abstract class FlinkHints {
     public static boolean canTransposeToTableScan(RelNode node) {
         return node instanceof LogicalProject // computed column on table
                 || node instanceof LogicalFilter
-                // TODO support lookup join hint with alias name in FLINK-28850
                 || node instanceof LogicalSnapshot;
     }
 
@@ -177,5 +182,56 @@ public abstract class FlinkHints {
         return allHints.stream()
                 .filter(hint -> hint.hintName.equals(FlinkHints.HINT_ALIAS))
                 .collect(Collectors.toList());
+    }
+
+    public static RelNode capitalizeJoinHints(RelNode root) {
+        return root.accept(new CapitalizeJoinHintShuttle());
+    }
+
+    private static class CapitalizeJoinHintShuttle extends RelShuttleImpl {
+
+        @Override
+        public RelNode visit(LogicalCorrelate correlate) {
+            return visitBiRel(correlate);
+        }
+
+        @Override
+        public RelNode visit(LogicalJoin join) {
+            return visitBiRel(join);
+        }
+
+        private RelNode visitBiRel(BiRel biRel) {
+            Hintable hBiRel = (Hintable) biRel;
+            AtomicBoolean changed = new AtomicBoolean(false);
+            List<RelHint> hintsWithCapitalJoinHints =
+                    hBiRel.getHints().stream()
+                            .map(
+                                    hint -> {
+                                        String capitalHintName =
+                                                hint.hintName.toUpperCase(Locale.ROOT);
+                                        if (JoinStrategy.isJoinStrategy(capitalHintName)) {
+                                            changed.set(true);
+                                            if (JoinStrategy.isLookupHint(hint.hintName)) {
+                                                return RelHint.builder(capitalHintName)
+                                                        .hintOptions(hint.kvOptions)
+                                                        .inheritPath(hint.inheritPath)
+                                                        .build();
+                                            }
+                                            return RelHint.builder(capitalHintName)
+                                                    .hintOptions(hint.listOptions)
+                                                    .inheritPath(hint.inheritPath)
+                                                    .build();
+                                        } else {
+                                            return hint;
+                                        }
+                                    })
+                            .collect(Collectors.toList());
+
+            if (changed.get()) {
+                return super.visit(hBiRel.withHints(hintsWithCapitalJoinHints));
+            } else {
+                return super.visit(biRel);
+            }
+        }
     }
 }

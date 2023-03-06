@@ -27,7 +27,7 @@ import org.apache.flink.table.gateway.rest.message.session.SessionMessageParamet
 
 import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponseStatus;
 
-/** Message headers for closing a session. */
+/** Message headers for getting session configuration. */
 public class GetSessionConfigHeaders
         implements SqlGatewayMessageHeaders<
                 EmptyRequestBody, GetSessionConfigResponseBody, SessionMessageParameters> {
@@ -75,5 +75,10 @@ public class GetSessionConfigHeaders
 
     public static GetSessionConfigHeaders getInstance() {
         return INSTANCE;
+    }
+
+    @Override
+    public String operationId() {
+        return "getSessionConfig";
     }
 }

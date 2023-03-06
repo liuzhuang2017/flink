@@ -391,7 +391,7 @@ public class SortMergeResultPartition extends ResultPartition {
                 break;
             }
 
-            updateStatistics(bufferWithChannel.getBuffer(), isBroadcast);
+            updateStatistics(bufferWithChannel, isBroadcast);
             toWrite.add(compressBufferIfPossible(bufferWithChannel));
         } while (true);
 
@@ -424,10 +424,14 @@ public class SortMergeResultPartition extends ResultPartition {
         return new BufferWithChannel(buffer, bufferWithChannel.getChannelIndex());
     }
 
-    private void updateStatistics(Buffer buffer, boolean isBroadcast) {
+    private void updateStatistics(BufferWithChannel bufferWithChannel, boolean isBroadcast) {
         numBuffersOut.inc(isBroadcast ? numSubpartitions : 1);
-        long readableBytes = buffer.readableBytes();
-        numBytesProduced.inc(readableBytes);
+        long readableBytes = bufferWithChannel.getBuffer().readableBytes();
+        if (isBroadcast) {
+            resultPartitionBytes.incAll(readableBytes);
+        } else {
+            resultPartitionBytes.inc(bufferWithChannel.getChannelIndex(), readableBytes);
+        }
         numBytesOut.inc(isBroadcast ? readableBytes * numSubpartitions : readableBytes);
     }
 
@@ -456,7 +460,7 @@ public class SortMergeResultPartition extends ResultPartition {
 
             NetworkBuffer buffer = new NetworkBuffer(writeBuffer, (buf) -> {}, dataType, toCopy);
             BufferWithChannel bufferWithChannel = new BufferWithChannel(buffer, targetSubpartition);
-            updateStatistics(buffer, isBroadcast);
+            updateStatistics(bufferWithChannel, isBroadcast);
             toWrite.add(compressBufferIfPossible(bufferWithChannel));
         }
 
@@ -505,7 +509,7 @@ public class SortMergeResultPartition extends ResultPartition {
     @Override
     public void close() {
         releaseFreeBuffers();
-        // the close method will be always called by the task thread, so there is need to make
+        // the close method will always be called by the task thread, so there is need to make
         // the sort buffer fields volatile and visible to the cancel thread intermediately
         releaseDataBuffer(unicastDataBuffer);
         releaseDataBuffer(broadcastDataBuffer);

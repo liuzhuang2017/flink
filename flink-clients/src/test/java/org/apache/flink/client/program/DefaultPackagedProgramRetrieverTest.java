@@ -50,7 +50,6 @@ import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.assertj.core.api.Assertions.fail;
 
 /** {@code PackagedProgramRetrieverImplTest} tests {@link DefaultPackagedProgramRetriever}. */
 class DefaultPackagedProgramRetrieverTest {
@@ -278,24 +277,6 @@ class DefaultPackagedProgramRetrieverTest {
     }
 
     @Test
-    void testFailIfJobDirDoesNotHaveEntryClass() {
-        assertThatThrownBy(
-                        () -> {
-                            DefaultPackagedProgramRetriever.create(
-                                    noEntryClassClasspathProvider.getDirectory(),
-                                    testJobEntryClassClasspathProvider.getJobClassName(),
-                                    ClasspathProviderExtension.parametersForTestJob("suffix"),
-                                    new Configuration());
-                            fail("This case should throw exception !");
-                        })
-                .isInstanceOf(FlinkException.class)
-                .hasMessageContaining(
-                        String.format(
-                                "Could not find the provided job class (%s) in the user lib directory.",
-                                testJobEntryClassClasspathProvider.getJobClassName()));
-    }
-
-    @Test
     void testEntryClassNotFoundOnSystemClasspath() {
         assertThatThrownBy(
                         () -> {
@@ -319,14 +300,21 @@ class DefaultPackagedProgramRetrieverTest {
 
     @Test
     void testEntryClassNotFoundOnUserClasspath() {
+        final String jobClassName = "NotExistingClass";
         assertThatThrownBy(
                         () ->
                                 DefaultPackagedProgramRetriever.create(
-                                        noEntryClassClasspathProvider.getDirectory(),
-                                        "NotExistingClass",
-                                        new String[0],
-                                        new Configuration()))
-                .isInstanceOf(FlinkException.class);
+                                                noEntryClassClasspathProvider.getDirectory(),
+                                                jobClassName,
+                                                new String[0],
+                                                new Configuration())
+                                        .getPackagedProgram())
+                .isInstanceOf(FlinkException.class)
+                .hasMessageContaining("Could not load the provided entrypoint class.")
+                .cause()
+                .hasMessageContaining(
+                        "The program's entry point class '%s' was not found in the jar file.",
+                        jobClassName);
     }
 
     @Test
@@ -552,7 +540,8 @@ class DefaultPackagedProgramRetrieverTest {
         final Pipeline pipeline =
                 PackagedProgramUtils.getPipelineFromProgram(
                         packagedProgram, configuration, defaultParallelism, false);
-        return PipelineExecutorUtils.getJobGraph(pipeline, configuration);
+        return PipelineExecutorUtils.getJobGraph(
+                pipeline, configuration, packagedProgram.getUserCodeClassLoader());
     }
 
     private static List<String> extractRelativizedURLsForJarsFromDirectory(File directory)

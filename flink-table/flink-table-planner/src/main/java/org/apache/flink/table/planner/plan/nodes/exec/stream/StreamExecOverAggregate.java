@@ -57,6 +57,7 @@ import org.apache.flink.table.runtime.operators.over.RowTimeRowsBoundedPreceding
 import org.apache.flink.table.runtime.operators.over.RowTimeRowsUnboundedPrecedingFunction;
 import org.apache.flink.table.runtime.types.LogicalTypeDataTypeConverter;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
+import org.apache.flink.table.runtime.util.StateConfigUtil;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 
@@ -245,7 +246,8 @@ public class StreamExecOverAggregate extends ExecNodeBase<RowData>
                         createTransformationMeta(OVER_AGGREGATE_TRANSFORMATION, config),
                         operator,
                         InternalTypeInfo.of(getOutputType()),
-                        inputTransform.getParallelism());
+                        inputTransform.getParallelism(),
+                        false);
 
         // set KeyType and Selector for state
         final RowDataKeySelector selector =
@@ -335,8 +337,7 @@ public class StreamExecOverAggregate extends ExecNodeBase<RowData>
             }
         } else {
             return new ProcTimeUnboundedPrecedingFunction<>(
-                    config.getStateRetentionTime(),
-                    TableConfigUtils.getMaxIdleStateRetentionTime(config),
+                    StateConfigUtil.createTtlConfig(config.getStateRetentionTime()),
                     genAggsHandler,
                     flattenAccTypes);
         }

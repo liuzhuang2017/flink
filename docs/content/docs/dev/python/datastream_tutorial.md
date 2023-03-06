@@ -47,7 +47,7 @@ In particular, Apache Flink's [user mailing list](https://flink.apache.org/commu
 If you want to follow along, you will require a computer with: 
 
 * Java 11
-* Python 3.6, 3.7, 3.8 or 3.9
+* Python 3.7, 3.8, 3.9 or 3.10
 
 Using Python DataStream API requires installing PyFlink, which is available on [PyPI](https://pypi.org/project/apache-flink/) and can be easily installed using `pip`. 
 
@@ -100,7 +100,7 @@ ds.sink_to(
 def split(line):
     yield from line.split()
 
-# 计算词频
+# compute word count
 ds = ds.flat_map(split) \
        .map(lambda i: (i, 1), output_type=Types.TUPLE([Types.STRING(), Types.INT()])) \
        .key_by(lambda i: i[0]) \

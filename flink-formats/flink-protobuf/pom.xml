@@ -26,7 +26,7 @@ under the License.
 	<parent>
 		<groupId>org.apache.flink</groupId>
 		<artifactId>flink-formats</artifactId>
-		<version>1.16-SNAPSHOT</version>
+		<version>1.18-SNAPSHOT</version>
 	</parent>
 
 	<artifactId>flink-protobuf</artifactId>
@@ -36,7 +36,7 @@ under the License.
 
 	<properties>
 		<!-- the same with flink-table/pom.xml -->
-		<janino.version>3.0.11</janino.version>
+		<janino.version>3.1.9</janino.version>
 	</properties>
 
 	<dependencies>
@@ -108,7 +108,8 @@ under the License.
 							<goal>run</goal>
 						</goals>
 						<configuration>
-							<protocVersion>${protoc.version}</protocVersion>
+							<protocArtifact>com.google.protobuf:protoc:${protoc.version}</protocArtifact>
+							<includeMavenTypes>direct</includeMavenTypes>
 							<inputDirectories>
 								<include>src/test/proto</include>
 							</inputDirectories>

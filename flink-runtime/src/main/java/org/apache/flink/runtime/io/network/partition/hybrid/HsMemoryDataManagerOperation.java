@@ -20,6 +20,8 @@ package org.apache.flink.runtime.io.network.partition.hybrid;
 
 import org.apache.flink.runtime.io.network.buffer.BufferBuilder;
 
+import java.util.Collection;
+
 /**
  * This interface is used by {@link HsSubpartitionMemoryDataManager} to operate {@link
  * HsMemoryDataManager}. Spilling decision may be made and handled inside these operations.
@@ -33,12 +35,12 @@ public interface HsMemoryDataManagerOperation {
     BufferBuilder requestBufferFromPool() throws InterruptedException;
 
     /**
-     * This method is called when buffer should mark as readable in {@link HsFileDataIndex}.
+     * This method is called when buffer should mark as released in {@link HsFileDataIndex}.
      *
      * @param subpartitionId the subpartition that target buffer belong to.
-     * @param bufferIndex index of buffer to mark as readable.
+     * @param bufferIndex index of buffer to mark as released.
      */
-    void markBufferReadableFromFile(int subpartitionId, int bufferIndex);
+    void markBufferReleasedFromFile(int subpartitionId, int bufferIndex);
 
     /**
      * This method is called when buffer is consumed.
@@ -53,7 +55,16 @@ public interface HsMemoryDataManagerOperation {
     /**
      * This method is called when subpartition data become available.
      *
-     * @param subpartitionId the subpartition need notify data available.
+     * @param subpartitionId the subpartition's identifier that this consumer belongs to.
+     * @param consumerIds the consumer's identifier which need notify data available.
      */
-    void onDataAvailable(int subpartitionId);
+    void onDataAvailable(int subpartitionId, Collection<HsConsumerId> consumerIds);
+
+    /**
+     * This method is called when consumer is decided to released.
+     *
+     * @param subpartitionId the subpartition's identifier that this consumer belongs to.
+     * @param consumerId the consumer's identifier which decided to be released.
+     */
+    void onConsumerReleased(int subpartitionId, HsConsumerId consumerId);
 }

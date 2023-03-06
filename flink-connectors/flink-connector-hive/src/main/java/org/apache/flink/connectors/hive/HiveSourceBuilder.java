@@ -234,11 +234,18 @@ public class HiveSourceBuilder {
                 continuousSourceSettings == null || partitionKeys.isEmpty()
                         ? DEFAULT_SPLIT_ASSIGNER
                         : SimpleSplitAssigner::new;
+        List<byte[]> hiveTablePartitionBytes = Collections.emptyList();
+        if (partitions != null) {
+            // Serializing the HiveTablePartition list manually at compile time to avoid
+            // deserializing it in TaskManager during runtime. The HiveTablePartition list is no
+            // need for TM.
+            hiveTablePartitionBytes = HivePartitionUtils.serializeHiveTablePartition(partitions);
+        }
+
         return new HiveSource<>(
                 new Path[1],
                 new HiveSourceFileEnumerator.Provider(
-                        partitions != null ? partitions : Collections.emptyList(),
-                        new JobConfWrapper(jobConf)),
+                        hiveTablePartitionBytes, new JobConfWrapper(jobConf)),
                 splitAssigner,
                 bulkFormat,
                 continuousSourceSettings,
@@ -247,7 +254,7 @@ public class HiveSourceBuilder {
                 partitionKeys,
                 hiveVersion,
                 dynamicFilterPartitionKeys,
-                partitions,
+                hiveTablePartitionBytes,
                 fetcher,
                 fetcherContext);
     }
@@ -296,15 +303,18 @@ public class HiveSourceBuilder {
     }
 
     private void setFlinkConfigurationToJobConf() {
+        int splitPartitionThreadNum =
+                flinkConf.get(HiveOptions.TABLE_EXEC_HIVE_LOAD_PARTITION_SPLITS_THREAD_NUM);
+        Preconditions.checkArgument(
+                splitPartitionThreadNum >= 1,
+                HiveOptions.TABLE_EXEC_HIVE_LOAD_PARTITION_SPLITS_THREAD_NUM.key()
+                        + " cannot be less than 1");
         jobConf.set(
                 HiveOptions.TABLE_EXEC_HIVE_LOAD_PARTITION_SPLITS_THREAD_NUM.key(),
-                flinkConf
-                        .get(HiveOptions.TABLE_EXEC_HIVE_LOAD_PARTITION_SPLITS_THREAD_NUM)
-                        .toString());
+                String.valueOf(splitPartitionThreadNum));
         jobConf.set(
                 HiveOptions.TABLE_EXEC_HIVE_INFER_SOURCE_PARALLELISM_MAX.key(),
                 flinkConf.get(HiveOptions.TABLE_EXEC_HIVE_INFER_SOURCE_PARALLELISM_MAX).toString());
-
         jobConf.set(
                 HiveOptions.TABLE_EXEC_HIVE_SPLIT_MAX_BYTES.key(),
                 String.valueOf(
@@ -313,6 +323,15 @@ public class HiveSourceBuilder {
                 HiveOptions.TABLE_EXEC_HIVE_FILE_OPEN_COST.key(),
                 String.valueOf(
                         flinkConf.get(HiveOptions.TABLE_EXEC_HIVE_FILE_OPEN_COST).getBytes()));
+        int calPartitionSizeThreadNum =
+                flinkConf.get(HiveOptions.TABLE_EXEC_HIVE_CALCULATE_PARTITION_SIZE_THREAD_NUM);
+        Preconditions.checkArgument(
+                calPartitionSizeThreadNum >= 1,
+                HiveOptions.TABLE_EXEC_HIVE_CALCULATE_PARTITION_SIZE_THREAD_NUM.key()
+                        + " cannot be less than 1");
+        jobConf.set(
+                HiveOptions.TABLE_EXEC_HIVE_CALCULATE_PARTITION_SIZE_THREAD_NUM.key(),
+                String.valueOf(calPartitionSizeThreadNum));
     }
 
     private boolean isStreamingSource() {

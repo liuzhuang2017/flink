@@ -158,8 +158,9 @@ public class SavepointWriterWindowITCase extends AbstractTestBase {
                         .keyBy(tuple -> tuple.f0, Types.STRING)
                         .window(TumblingEventTimeWindows.of(Time.milliseconds(5)));
 
-        SavepointWriter.newSavepoint(stateBackend, 128)
-                .withOperator(UID, windowBootstrap.bootstrap(transformation))
+        SavepointWriter.newSavepoint(env, stateBackend, 128)
+                .withOperator(
+                        OperatorIdentifier.forUid(UID), windowBootstrap.bootstrap(transformation))
                 .write(savepointPath);
 
         env.execute("write state");
@@ -202,8 +203,9 @@ public class SavepointWriterWindowITCase extends AbstractTestBase {
                         .window(TumblingEventTimeWindows.of(Time.milliseconds(5)))
                         .evictor(CountEvictor.of(1));
 
-        SavepointWriter.newSavepoint(stateBackend, 128)
-                .withOperator(UID, windowBootstrap.bootstrap(transformation))
+        SavepointWriter.newSavepoint(env, stateBackend, 128)
+                .withOperator(
+                        OperatorIdentifier.forUid(UID), windowBootstrap.bootstrap(transformation))
                 .write(savepointPath);
 
         env.execute("write state");
@@ -247,8 +249,9 @@ public class SavepointWriterWindowITCase extends AbstractTestBase {
                                 SlidingEventTimeWindows.of(
                                         Time.milliseconds(5), Time.milliseconds(1)));
 
-        SavepointWriter.newSavepoint(stateBackend, 128)
-                .withOperator(UID, windowBootstrap.bootstrap(transformation))
+        SavepointWriter.newSavepoint(env, stateBackend, 128)
+                .withOperator(
+                        OperatorIdentifier.forUid(UID), windowBootstrap.bootstrap(transformation))
                 .write(savepointPath);
 
         env.execute("write state");
@@ -295,8 +298,9 @@ public class SavepointWriterWindowITCase extends AbstractTestBase {
                                         Time.milliseconds(5), Time.milliseconds(1)))
                         .evictor(CountEvictor.of(1));
 
-        SavepointWriter.newSavepoint(stateBackend, 128)
-                .withOperator(UID, windowBootstrap.bootstrap(transformation))
+        SavepointWriter.newSavepoint(env, stateBackend, 128)
+                .withOperator(
+                        OperatorIdentifier.forUid(UID), windowBootstrap.bootstrap(transformation))
                 .write(savepointPath);
 
         env.execute("write state");

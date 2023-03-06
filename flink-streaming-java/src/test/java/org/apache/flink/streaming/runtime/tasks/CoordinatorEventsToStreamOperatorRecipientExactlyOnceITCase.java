@@ -114,7 +114,9 @@ public class CoordinatorEventsToStreamOperatorRecipientExactlyOnceITCase
         env.setParallelism(1);
         env.enableCheckpointing(100);
         ManuallyClosedSourceFunction.shouldCloseSource = false;
-        EventSendingCoordinatorWithGuaranteedCheckpoint.isEventSentAfterFirstCheckpoint = false;
+        EventReceivingOperator.shouldUnblockAllCheckpoint = false;
+        EventReceivingOperator.shouldUnblockNextCheckpoint = false;
+        TestScript.reset();
     }
 
     @Test
@@ -162,10 +164,6 @@ public class CoordinatorEventsToStreamOperatorRecipientExactlyOnceITCase
         // when checkpoint barriers are injected into sources, the event receiving operator has not
         // started checkpoint yet.
         env.addSource(new ManuallyClosedSourceFunction<>(), TypeInformation.of(Long.class))
-                .transform(
-                        "blockCheckpointBarrier",
-                        TypeInformation.of(Long.class),
-                        new BlockCheckpointBarrierOperator<>())
                 .disableChaining()
                 .transform(factory.name, TypeInformation.of(Long.class), factory)
                 .addSink(new DiscardingSink<>());
@@ -198,29 +196,6 @@ public class CoordinatorEventsToStreamOperatorRecipientExactlyOnceITCase
     }
 
     /**
-     * A stream operator that blocks the checkpoint barrier until the coordinator has sent events to
-     * its subtask. It helps to guarantee that there are events being sent when the coordinator has
-     * completed the first checkpoint while the subtask has not yet.
-     */
-    private static class BlockCheckpointBarrierOperator<T> extends AbstractStreamOperator<T>
-            implements OneInputStreamOperator<T, T> {
-
-        @Override
-        public void processElement(StreamRecord<T> element) throws Exception {
-            output.collect(element);
-        }
-
-        @Override
-        public void snapshotState(StateSnapshotContext context) throws Exception {
-            super.snapshotState(context);
-            while (!EventSendingCoordinatorWithGuaranteedCheckpoint
-                    .isEventSentAfterFirstCheckpoint) {
-                Thread.sleep(100);
-            }
-        }
-    }
-
-    /**
      * A wrapper operator factory for {@link EventSendingCoordinatorWithGuaranteedCheckpoint} and
      * {@link EventReceivingOperator}.
      */
@@ -232,7 +207,7 @@ public class CoordinatorEventsToStreamOperatorRecipientExactlyOnceITCase
 
         protected final int numEvents;
 
-        private final int delay;
+        protected final int delay;
 
         public EventReceivingOperatorFactory(String name, int numEvents, int delay) {
             this.name = name;
@@ -293,14 +268,14 @@ public class CoordinatorEventsToStreamOperatorRecipientExactlyOnceITCase
     private static class EventSendingCoordinatorWithGuaranteedCheckpoint
             extends EventSendingCoordinator {
 
-        /** Whether the coordinator has sent any event to its subtask after any checkpoint. */
-        private static boolean isEventSentAfterFirstCheckpoint;
-
         /**
          * The max number that the coordinator might send out before it completes the first
          * checkpoint.
          */
         private final int maxNumberBeforeFirstCheckpoint;
+
+        /** Whether the coordinator has sent any event to its subtask after any checkpoint. */
+        private boolean isEventSentAfterFirstCheckpoint;
 
         /** Whether the coordinator has completed the first checkpoint. */
         private boolean isCoordinatorFirstCheckpointCompleted;
@@ -312,6 +287,7 @@ public class CoordinatorEventsToStreamOperatorRecipientExactlyOnceITCase
                 Context context, String name, int numEvents, int delay) {
             super(context, name, numEvents, delay);
             this.maxNumberBeforeFirstCheckpoint = new Random().nextInt(numEvents / 6);
+            this.isEventSentAfterFirstCheckpoint = false;
             this.isCoordinatorFirstCheckpointCompleted = false;
             this.isJobFirstCheckpointCompleted = false;
         }
@@ -331,6 +307,7 @@ public class CoordinatorEventsToStreamOperatorRecipientExactlyOnceITCase
 
             if (!isEventSentAfterFirstCheckpoint && isCoordinatorFirstCheckpointCompleted) {
                 isEventSentAfterFirstCheckpoint = true;
+                EventReceivingOperator.shouldUnblockAllCheckpoint = true;
             }
         }
 
@@ -382,11 +359,22 @@ public class CoordinatorEventsToStreamOperatorRecipientExactlyOnceITCase
     /**
      * The stream operator that receives the events and accumulates the numbers. The task is
      * stateful and checkpoints the accumulator.
+     *
+     * <p>The operator also supports blocking the checkpoint process until certain signal is invoked
+     * (See {@link #shouldUnblockAllCheckpoint} and {@link #shouldUnblockNextCheckpoint}). It helps
+     * to guarantee that there are events being sent when the coordinator has completed a checkpoint
+     * while the subtask has not yet.
      */
     private static class EventReceivingOperator<T> extends AbstractStreamOperator<T>
             implements OneInputStreamOperator<T, T>, OperatorEventHandler {
 
         protected static final String ACCUMULATOR_NAME = "receivedIntegers";
+
+        /** Whether to unblock all the following checkpoints. */
+        private static boolean shouldUnblockAllCheckpoint;
+
+        /** Whether to unblock the next checkpoint. */
+        private static boolean shouldUnblockNextCheckpoint;
 
         protected final ListAccumulator<Integer> accumulator = new ListAccumulator<>();
 
@@ -426,6 +414,14 @@ public class CoordinatorEventsToStreamOperatorRecipientExactlyOnceITCase
         @Override
         public void snapshotState(StateSnapshotContext context) throws Exception {
             super.snapshotState(context);
+            while (!shouldUnblockAllCheckpoint && !shouldUnblockNextCheckpoint) {
+                Thread.sleep(100);
+            }
+
+            if (shouldUnblockNextCheckpoint) {
+                shouldUnblockNextCheckpoint = false;
+            }
+
             state.update(accumulator.getLocalValue());
         }
 

@@ -42,6 +42,7 @@ import org.apache.flink.streaming.api.transformations.OneInputTransformation;
 import org.apache.flink.streaming.api.transformations.PartitionTransformation;
 import org.apache.flink.streaming.api.transformations.SideOutputTransformation;
 import org.apache.flink.streaming.api.transformations.TwoInputTransformation;
+import org.apache.flink.streaming.api.transformations.python.DelegateOperatorTransformation;
 import org.apache.flink.streaming.api.transformations.python.PythonBroadcastStateTransformation;
 import org.apache.flink.streaming.api.transformations.python.PythonKeyedBroadcastStateTransformation;
 import org.apache.flink.streaming.api.utils.ByteArrayWrapper;
@@ -57,7 +58,6 @@ import org.apache.flink.shaded.guava30.com.google.common.collect.Sets;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
-import java.lang.reflect.InvocationTargetException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -74,29 +74,8 @@ public class PythonConfigUtil {
     public static final String STREAM_PARTITION_CUSTOM_MAP_OPERATOR_NAME =
             "_partition_custom_map_operator";
 
-    /**
-     * Get the private field {@link StreamExecutionEnvironment#configuration} by reflection
-     * recursively. It allows modification to the configuration compared with {@link
-     * StreamExecutionEnvironment#getConfiguration()}.
-     */
-    public static Configuration getEnvironmentConfig(StreamExecutionEnvironment env)
-            throws InvocationTargetException, IllegalAccessException, NoSuchFieldException {
-        Field configurationField = null;
-        for (Class<?> clz = env.getClass(); clz != Object.class; clz = clz.getSuperclass()) {
-            try {
-                configurationField = clz.getDeclaredField("configuration");
-                break;
-            } catch (NoSuchFieldException e) {
-                // ignore
-            }
-        }
-
-        if (configurationField == null) {
-            throw new NoSuchFieldException("Field 'configuration' not found.");
-        }
-
-        configurationField.setAccessible(true);
-        return (Configuration) configurationField.get(env);
+    public static Configuration getEnvironmentConfig(StreamExecutionEnvironment env) {
+        return (Configuration) env.getConfiguration();
     }
 
     public static void configPythonOperator(StreamExecutionEnvironment env) throws Exception {
@@ -174,6 +153,8 @@ public class PythonConfigUtil {
             return ((TwoInputTransformation<?, ?, ?>) transform).getOperatorFactory();
         } else if (transform instanceof AbstractMultipleInputTransformation) {
             return ((AbstractMultipleInputTransformation<?>) transform).getOperatorFactory();
+        } else if (transform instanceof DelegateOperatorTransformation<?>) {
+            return ((DelegateOperatorTransformation<?>) transform).getOperatorFactory();
         } else {
             return null;
         }
@@ -211,7 +192,7 @@ public class PythonConfigUtil {
                 .getSlotSharingGroup()
                 .ifPresent(firstTransformation::setSlotSharingGroup);
         firstTransformation.setCoLocationGroupKey(secondTransformation.getCoLocationGroupKey());
-        firstTransformation.setParallelism(secondTransformation.getParallelism());
+        firstTransformation.setParallelism(secondTransformation.getParallelism(), false);
     }
 
     private static void configForwardPartitioner(
@@ -236,6 +217,9 @@ public class PythonConfigUtil {
         } else if (transformation instanceof AbstractMultipleInputTransformation) {
             operatorFactory =
                     ((AbstractMultipleInputTransformation<?>) transformation).getOperatorFactory();
+        } else if (transformation instanceof DelegateOperatorTransformation) {
+            operatorFactory =
+                    ((DelegateOperatorTransformation<?>) transformation).getOperatorFactory();
         }
 
         if (operatorFactory instanceof SimpleOperatorFactory
@@ -282,6 +266,9 @@ public class PythonConfigUtil {
         } else if (transform instanceof TwoInputTransformation) {
             return isPythonDataStreamOperator(
                     ((TwoInputTransformation<?, ?, ?>) transform).getOperatorFactory());
+        } else if (transform instanceof PythonBroadcastStateTransformation
+                || transform instanceof PythonKeyedBroadcastStateTransformation) {
+            return true;
         } else {
             return false;
         }

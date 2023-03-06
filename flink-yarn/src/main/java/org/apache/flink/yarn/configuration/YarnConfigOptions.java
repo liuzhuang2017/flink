@@ -194,7 +194,7 @@ public class YarnConfigOptions {
      * unset yarn priority setting and use cluster default priority.
      *
      * @see <a
-     *     href="https://hadoop.apache.org/docs/r2.8.5/hadoop-yarn/hadoop-yarn-site/CapacityScheduler.html">YARN
+     *     href="https://hadoop.apache.org/docs/r2.10.2/hadoop-yarn/hadoop-yarn-site/CapacityScheduler.html">YARN
      *     Capacity Scheduling Doc</a>
      */
     public static final ConfigOption<Integer> APPLICATION_PRIORITY =
@@ -323,7 +323,7 @@ public class YarnConfigOptions {
                                     + " localized to. If "
                                     + SHIP_LOCAL_KEYTAB.key()
                                     + " set to "
-                                    + "true, Flink willl ship the keytab file as a YARN local "
+                                    + "true, Flink will ship the keytab file as a YARN local "
                                     + "resource. In this case, the path is relative to the local "
                                     + "resource directory. If set to false, Flink"
                                     + " will try to directly locate the keytab from the path itself.");

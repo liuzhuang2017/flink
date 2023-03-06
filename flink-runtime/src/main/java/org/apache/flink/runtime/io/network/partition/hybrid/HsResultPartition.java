@@ -30,11 +30,13 @@ import org.apache.flink.runtime.io.network.buffer.Buffer;
 import org.apache.flink.runtime.io.network.buffer.BufferCompressor;
 import org.apache.flink.runtime.io.network.buffer.BufferPool;
 import org.apache.flink.runtime.io.network.partition.BufferAvailabilityListener;
+import org.apache.flink.runtime.io.network.partition.PartitionNotFoundException;
 import org.apache.flink.runtime.io.network.partition.ResultPartition;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionID;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionManager;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionType;
 import org.apache.flink.runtime.io.network.partition.ResultSubpartitionView;
+import org.apache.flink.runtime.io.network.partition.hybrid.HybridShuffleConfiguration.SpillingStrategyType;
 import org.apache.flink.runtime.metrics.groups.TaskIOMetricGroup;
 import org.apache.flink.util.function.SupplierWithException;
 
@@ -43,6 +45,7 @@ import javax.annotation.Nullable;
 import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.ScheduledExecutorService;
 
@@ -57,6 +60,10 @@ import static org.apache.flink.util.Preconditions.checkState;
 public class HsResultPartition extends ResultPartition {
     public static final String DATA_FILE_SUFFIX = ".hybrid.data";
 
+    public static final String INDEX_FILE_SUFFIX = ".hybrid.index";
+
+    public static final int BROADCAST_CHANNEL = 0;
+
     private final HsFileDataIndex dataIndex;
 
     private final HsFileDataManager fileDataManager;
@@ -67,9 +74,15 @@ public class HsResultPartition extends ResultPartition {
 
     private final HybridShuffleConfiguration hybridShuffleConfiguration;
 
+    /** Record the last assigned consumerId for each subpartition. */
+    private final HsConsumerId[] lastConsumerIds;
+
     private boolean hasNotifiedEndOfUserRecords;
 
     @Nullable private HsMemoryDataManager memoryDataManager;
+
+    /** Whether this result partition broadcasts all data and event. */
+    private final boolean isBroadcastOnly;
 
     public HsResultPartition(
             String owningTaskName,
@@ -85,6 +98,7 @@ public class HsResultPartition extends ResultPartition {
             int networkBufferSize,
             HybridShuffleConfiguration hybridShuffleConfiguration,
             @Nullable BufferCompressor bufferCompressor,
+            boolean isBroadcastOnly,
             SupplierWithException<BufferPool, IOException> bufferPoolFactory) {
         super(
                 owningTaskName,
@@ -97,9 +111,15 @@ public class HsResultPartition extends ResultPartition {
                 bufferCompressor,
                 bufferPoolFactory);
         this.networkBufferSize = networkBufferSize;
-        this.dataIndex = new HsFileDataIndexImpl(numSubpartitions);
         this.dataFilePath = new File(dataFileBashPath + DATA_FILE_SUFFIX).toPath();
+        this.dataIndex =
+                new HsFileDataIndexImpl(
+                        isBroadcastOnly ? 1 : numSubpartitions,
+                        new File(dataFileBashPath + INDEX_FILE_SUFFIX).toPath(),
+                        hybridShuffleConfiguration.getSpilledIndexSegmentSize(),
+                        hybridShuffleConfiguration.getNumRetainedInMemoryRegionsMax());
         this.hybridShuffleConfiguration = hybridShuffleConfiguration;
+        this.isBroadcastOnly = isBroadcastOnly;
         this.fileDataManager =
                 new HsFileDataManager(
                         readBufferPool,
@@ -108,6 +128,7 @@ public class HsResultPartition extends ResultPartition {
                         dataFilePath,
                         HsSubpartitionFileReaderImpl.Factory.INSTANCE,
                         hybridShuffleConfiguration);
+        this.lastConsumerIds = new HsConsumerId[numSubpartitions];
     }
 
     // Called by task thread.
@@ -119,13 +140,14 @@ public class HsResultPartition extends ResultPartition {
         this.fileDataManager.setup();
         this.memoryDataManager =
                 new HsMemoryDataManager(
-                        numSubpartitions,
+                        isBroadcastOnly ? 1 : numSubpartitions,
                         networkBufferSize,
                         bufferPool,
                         getSpillingStrategy(hybridShuffleConfiguration),
                         dataIndex,
                         dataFilePath,
-                        bufferCompressor);
+                        bufferCompressor,
+                        hybridShuffleConfiguration.getBufferPoolSizeCheckIntervalMs());
     }
 
     @Override
@@ -137,7 +159,7 @@ public class HsResultPartition extends ResultPartition {
 
     @Override
     public void emitRecord(ByteBuffer record, int targetSubpartition) throws IOException {
-        numBytesProduced.inc(record.remaining());
+        resultPartitionBytes.inc(targetSubpartition, record.remaining());
         emit(record, targetSubpartition, Buffer.DataType.DATA_BUFFER);
     }
 
@@ -158,9 +180,13 @@ public class HsResultPartition extends ResultPartition {
     }
 
     private void broadcast(ByteBuffer record, Buffer.DataType dataType) throws IOException {
-        numBytesProduced.inc(record.remaining());
-        for (int i = 0; i < numSubpartitions; i++) {
-            emit(record.duplicate(), i, dataType);
+        resultPartitionBytes.incAll(record.remaining());
+        if (isBroadcastOnly) {
+            emit(record, BROADCAST_CHANNEL, dataType);
+        } else {
+            for (int i = 0; i < numSubpartitions; i++) {
+                emit(record.duplicate(), i, dataType);
+            }
         }
     }
 
@@ -175,17 +201,36 @@ public class HsResultPartition extends ResultPartition {
             int subpartitionId, BufferAvailabilityListener availabilityListener)
             throws IOException {
         checkState(!isReleased(), "ResultPartition already released.");
-        HsSubpartitionView subpartitionView = new HsSubpartitionView(availabilityListener);
+
+        // If data file is not readable, throw PartitionNotFoundException to mark this result
+        // partition failed. Otherwise, the partition data is not regenerated, so failover can not
+        // recover the job.
+        if (!Files.isReadable(dataFilePath)) {
+            throw new PartitionNotFoundException(getPartitionId());
+        }
+        // if broadcastOptimize is enabled, map every subpartitionId to the special broadcast
+        // channel.
+        subpartitionId = isBroadcastOnly ? BROADCAST_CHANNEL : subpartitionId;
+
+        HsSubpartitionConsumer subpartitionConsumer =
+                new HsSubpartitionConsumer(availabilityListener);
+        HsConsumerId lastConsumerId = lastConsumerIds[subpartitionId];
+        checkMultipleConsumerIsAllowed(lastConsumerId, hybridShuffleConfiguration);
+        // assign a unique id for each consumer, now it is guaranteed by the value that is one
+        // higher than the last consumerId's id field.
+        HsConsumerId consumerId = HsConsumerId.newId(lastConsumerId);
+        lastConsumerIds[subpartitionId] = consumerId;
         HsDataView diskDataView =
-                fileDataManager.registerNewSubpartition(subpartitionId, subpartitionView);
+                fileDataManager.registerNewConsumer(
+                        subpartitionId, consumerId, subpartitionConsumer);
 
         HsDataView memoryDataView =
                 checkNotNull(memoryDataManager)
-                        .registerSubpartitionView(subpartitionId, subpartitionView);
+                        .registerNewConsumer(subpartitionId, consumerId, subpartitionConsumer);
 
-        subpartitionView.setDiskDataView(diskDataView);
-        subpartitionView.setMemoryDataView(memoryDataView);
-        return subpartitionView;
+        subpartitionConsumer.setDiskDataView(diskDataView);
+        subpartitionConsumer.setMemoryDataView(memoryDataView);
+        return subpartitionConsumer;
     }
 
     @Override
@@ -226,15 +271,12 @@ public class HsResultPartition extends ResultPartition {
 
     @Override
     protected void releaseInternal() {
-        // release is called when release by scheduler, later than close.
+        // release is called when release by scheduler or failed.
         // mainly work :
         // 1. release read scheduler.
         // 2. delete shuffle file.
-        // 3. release all data in memory.
 
         fileDataManager.release();
-
-        checkNotNull(memoryDataManager).release();
     }
 
     @Override
@@ -272,6 +314,17 @@ public class HsResultPartition extends ResultPartition {
                 return new HsSelectiveSpillingStrategy(hybridShuffleConfiguration);
             default:
                 throw new IllegalConfigurationException("Illegal spilling strategy.");
+        }
+    }
+
+    private void checkMultipleConsumerIsAllowed(
+            HsConsumerId lastConsumerId, HybridShuffleConfiguration hybridShuffleConfiguration) {
+        if (hybridShuffleConfiguration.getSpillingStrategyType()
+                == SpillingStrategyType.SELECTIVE) {
+            checkState(
+                    lastConsumerId == null,
+                    "Multiple consumer is not allowed for %s spilling strategy mode",
+                    hybridShuffleConfiguration.getSpillingStrategyType());
         }
     }
 }

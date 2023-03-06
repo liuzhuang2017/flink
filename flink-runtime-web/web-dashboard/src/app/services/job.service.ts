@@ -122,6 +122,17 @@ export class JobService {
     );
   }
 
+  public loadOperatorFlameGraphForSingleSubtask(
+    jobId: string,
+    vertexId: string,
+    type: string,
+    subtaskIndex: string
+  ): Observable<JobFlameGraph> {
+    return this.httpClient.get<JobFlameGraph>(
+      `${this.configService.BASE_URL}/jobs/${jobId}/vertices/${vertexId}/flamegraph?type=${type}&subtaskindex=${subtaskIndex}`
+    );
+  }
+
   public loadSubTasks(jobId: string, vertexId: string): Observable<JobVertexSubTaskDetail> {
     return this.httpClient.get<JobVertexSubTaskDetail>(
       `${this.configService.BASE_URL}/jobs/${jobId}/vertices/${vertexId}`
@@ -168,7 +179,7 @@ export class JobService {
   private convertJob(job: JobDetail): JobDetailCorrect {
     const links: VerticesLink[] = [];
     let nodes: NodesItemCorrect[] = [];
-    if (job.plan?.nodes.length) {
+    if (job.plan?.nodes?.length) {
       nodes = job.plan.nodes.map(node => {
         let detail;
         if (job.vertices && job.vertices.length) {

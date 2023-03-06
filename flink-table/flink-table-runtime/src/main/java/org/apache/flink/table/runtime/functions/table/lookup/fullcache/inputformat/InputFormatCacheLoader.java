@@ -32,14 +32,15 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Collection;
-import java.util.List;
+import java.util.Deque;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /** {@link CacheLoader} that used {@link InputFormat} for loading data into the cache. */
@@ -51,10 +52,7 @@ public class InputFormatCacheLoader extends CacheLoader {
     private final GenericRowDataKeySelector keySelector;
     private final RowDataSerializer cacheEntriesSerializer;
 
-    private transient volatile List<InputSplitCacheLoadTask> cacheLoadTasks;
     private transient Configuration parameters;
-
-    private volatile boolean isStopped;
 
     public InputFormatCacheLoader(
             InputFormat<RowData, ?> initialInputFormat,
@@ -67,58 +65,63 @@ public class InputFormatCacheLoader extends CacheLoader {
     }
 
     @Override
-    public void open(Configuration parameters) throws Exception {
-        super.open(parameters);
+    public void open(Configuration parameters, ClassLoader userCodeClassLoader) throws Exception {
+        super.open(parameters, userCodeClassLoader);
         this.parameters = parameters;
         this.initialInputFormat.configure(parameters);
     }
 
     @Override
-    protected void reloadCache() throws Exception {
+    protected boolean updateCache() throws Exception {
         InputSplit[] inputSplits = createInputSplits();
         int numSplits = inputSplits.length;
+        int concurrencyLevel = getConcurrencyLevel(numSplits);
         // load data into the another copy of cache
-        // notice: it requires twice more memory, but on the other hand we don't need any blocking
+        // notice: it requires twice more memory, but on the other hand we don't need any blocking;
         // cache has default initialCapacity and loadFactor, but overridden concurrencyLevel
         ConcurrentHashMap<RowData, Collection<RowData>> newCache =
-                new ConcurrentHashMap<>(16, 0.75f, getConcurrencyLevel(numSplits));
-        this.cacheLoadTasks =
+                new ConcurrentHashMap<>(16, 0.75f, concurrencyLevel);
+        Deque<InputSplitCacheLoadTask> cacheLoadTasks =
                 Arrays.stream(inputSplits)
                         .map(split -> createCacheLoadTask(split, newCache))
-                        .collect(Collectors.toList());
-
-        // run first task and start numTasks - 1 threads to run remaining tasks
+                        .collect(Collectors.toCollection(ArrayDeque::new));
+        // run first task and create concurrencyLevel - 1 threads to run remaining tasks
         ExecutorService cacheLoadTaskService = null;
-        List<Future<?>> futures = null;
-        if (numSplits > 1) {
-            futures = new ArrayList<>();
-            int numThreads = getConcurrencyLevel(numSplits) - 1;
-            cacheLoadTaskService = Executors.newFixedThreadPool(numThreads);
-            for (int i = 1; i < numSplits; i++) {
-                Future<?> future = cacheLoadTaskService.submit(cacheLoadTasks.get(i));
-                futures.add(future);
+        boolean wasInterrupted = false;
+        try {
+            InputSplitCacheLoadTask firstTask = cacheLoadTasks.pop();
+            CompletableFuture<?> otherTasksFuture = null;
+            if (!cacheLoadTasks.isEmpty()) {
+                cacheLoadTaskService = Executors.newFixedThreadPool(concurrencyLevel - 1);
+                ExecutorService finalExecutor = cacheLoadTaskService;
+                CompletableFuture<?>[] futures =
+                        cacheLoadTasks.stream()
+                                .map(task -> CompletableFuture.runAsync(task, finalExecutor))
+                                .toArray(CompletableFuture<?>[]::new);
+                otherTasksFuture = CompletableFuture.allOf(futures);
+            }
+            firstTask.run(); // normally finishes if interrupted and saves interrupted status
+            if (otherTasksFuture != null) {
+                otherTasksFuture.get(); // if any exception occurs it will be thrown here
+            }
+        } catch (InterruptedException ignored) { // we use interrupt to close reload threads
+            Thread.currentThread().interrupt(); // restore interrupted status
+        } finally {
+            wasInterrupted = Thread.interrupted();
+            if (cacheLoadTaskService != null) {
+                // if main cache reload thread encountered an exception,
+                // it interrupts underlying InputSplitCacheLoadTasks threads
+                cacheLoadTaskService.shutdownNow();
+                if (!cacheLoadTaskService.awaitTermination(
+                        TIMEOUT_AFTER_INTERRUPT_MS, TimeUnit.MILLISECONDS)) {
+                    LOG.error(
+                            "ExecutorService with InputSplit cache loading tasks was not terminated in timeout of {} ms.",
+                            TIMEOUT_AFTER_INTERRUPT_MS);
+                }
             }
         }
-        cacheLoadTasks.get(0).run();
-        if (cacheLoadTaskService != null) {
-            for (Future<?> future : futures) {
-                future.get(); // if any exception occurs it will be thrown here
-            }
-            cacheLoadTaskService.shutdownNow();
-        }
-        if (!isStopped) {
-            // reassigning cache field is safe, because it's volatile
-            cache = newCache;
-        }
-    }
-
-    @Override
-    public void close() throws Exception {
-        super.close();
-        isStopped = true;
-        if (cacheLoadTasks != null) {
-            cacheLoadTasks.forEach(InputSplitCacheLoadTask::stopRunning);
-        }
+        cache = newCache; // reassigning cache field is safe, because it's volatile
+        return !wasInterrupted;
     }
 
     private InputSplitCacheLoadTask createCacheLoadTask(

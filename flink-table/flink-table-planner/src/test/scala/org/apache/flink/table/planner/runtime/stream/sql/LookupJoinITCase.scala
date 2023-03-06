@@ -28,6 +28,7 @@ import org.apache.flink.table.data.binary.BinaryStringData
 import org.apache.flink.table.planner.factories.TestValuesTableFactory
 import org.apache.flink.table.planner.runtime.utils.{InMemoryLookupableTableSource, StreamingTestBase, TestingAppendSink, TestingRetractSink}
 import org.apache.flink.table.planner.runtime.utils.UserDefinedFunctionTestUtils.TestAddWithOpen
+import org.apache.flink.table.runtime.functions.table.fullcache.inputformat.FullCacheTestInputFormat
 import org.apache.flink.table.runtime.functions.table.lookup.LookupCacheManager
 import org.apache.flink.types.Row
 
@@ -77,6 +78,12 @@ class LookupJoinITCase(legacyTableSource: Boolean, cacheType: LookupCacheType)
   @Before
   override def before(): Unit = {
     super.before()
+    if (legacyTableSource) {
+      InMemoryLookupableTableSource.RESOURCE_COUNTER.set(0)
+    } else {
+      TestValuesTableFactory.RESOURCE_COUNTER.set(0)
+      FullCacheTestInputFormat.OPEN_CLOSED_COUNTER.set(0)
+    }
     createScanTable("src", data)
     createScanTable("nullable_src", dataWithNull)
     createLookupTable("user_table", userData)
@@ -94,6 +101,7 @@ class LookupJoinITCase(legacyTableSource: Boolean, cacheType: LookupCacheType)
       assertEquals(0, InMemoryLookupableTableSource.RESOURCE_COUNTER.get())
     } else {
       assertEquals(0, TestValuesTableFactory.RESOURCE_COUNTER.get())
+      assertEquals(0, FullCacheTestInputFormat.OPEN_CLOSED_COUNTER.get())
     }
   }
 
@@ -732,7 +740,7 @@ class LookupJoinITCase(legacyTableSource: Boolean, cacheType: LookupCacheType)
 
   @Test
   def testJoinTemporalTableWithRetry(): Unit = {
-    val maxRetryTwiceHint = getRetryLookupHint("user_table", 2)
+    val maxRetryTwiceHint = getRetryLookupHint("D", 2)
     val sink = new TestingAppendSink
     tEnv
       .sqlQuery(s"""
@@ -751,7 +759,7 @@ class LookupJoinITCase(legacyTableSource: Boolean, cacheType: LookupCacheType)
 
   @Test
   def testJoinTemporalTableWithLookupThresholdWithInsufficientRetry(): Unit = {
-    val maxRetryOnceHint = getRetryLookupHint("user_table_with_lookup_threshold3", 1)
+    val maxRetryOnceHint = getRetryLookupHint("D", 1)
     val sink = new TestingAppendSink
     tEnv
       .sqlQuery(s"""
@@ -775,7 +783,7 @@ class LookupJoinITCase(legacyTableSource: Boolean, cacheType: LookupCacheType)
 
   @Test
   def testJoinTemporalTableWithLookupThresholdWithSufficientRetry(): Unit = {
-    val maxRetryTwiceHint = getRetryLookupHint("user_table_with_lookup_threshold2", 2)
+    val maxRetryTwiceHint = getRetryLookupHint("D", 2)
 
     val sink = new TestingAppendSink
     tEnv
@@ -795,7 +803,7 @@ class LookupJoinITCase(legacyTableSource: Boolean, cacheType: LookupCacheType)
   @Test
   def testJoinTemporalTableWithLookupThresholdWithLargerRetry(): Unit = {
     // max times beyond the lookup threshold of 'user_table_with_lookup_threshold2'
-    val largerRetryHint = getRetryLookupHint("user_table_with_lookup_threshold2", 10)
+    val largerRetryHint = getRetryLookupHint("D", 10)
 
     val sink = new TestingAppendSink
     tEnv

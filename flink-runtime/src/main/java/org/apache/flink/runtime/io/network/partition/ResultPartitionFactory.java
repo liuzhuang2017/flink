@@ -75,6 +75,10 @@ public class ResultPartitionFactory {
 
     private final int sortShuffleMinParallelism;
 
+    private final int hybridShuffleSpilledIndexSegmentSize;
+
+    private final long hybridShuffleNumRetainedInMemoryRegionsMax;
+
     private final boolean sslEnabled;
 
     private final int maxOverdraftBuffersPerGate;
@@ -95,7 +99,9 @@ public class ResultPartitionFactory {
             int sortShuffleMinBuffers,
             int sortShuffleMinParallelism,
             boolean sslEnabled,
-            int maxOverdraftBuffersPerGate) {
+            int maxOverdraftBuffersPerGate,
+            int hybridShuffleSpilledIndexSegmentSize,
+            long hybridShuffleNumRetainedInMemoryRegionsMax) {
 
         this.partitionManager = partitionManager;
         this.channelManager = channelManager;
@@ -113,6 +119,9 @@ public class ResultPartitionFactory {
         this.sortShuffleMinParallelism = sortShuffleMinParallelism;
         this.sslEnabled = sslEnabled;
         this.maxOverdraftBuffersPerGate = maxOverdraftBuffersPerGate;
+        this.hybridShuffleSpilledIndexSegmentSize = hybridShuffleSpilledIndexSegmentSize;
+        this.hybridShuffleNumRetainedInMemoryRegionsMax =
+                hybridShuffleNumRetainedInMemoryRegionsMax;
     }
 
     public ResultPartition create(
@@ -126,6 +135,7 @@ public class ResultPartitionFactory {
                 desc.getPartitionType(),
                 desc.getNumberOfSubpartitions(),
                 desc.getMaxParallelism(),
+                desc.isBroadcast(),
                 createBufferPoolFactory(desc.getNumberOfSubpartitions(), desc.getPartitionType()));
     }
 
@@ -137,6 +147,7 @@ public class ResultPartitionFactory {
             ResultPartitionType type,
             int numberOfSubpartitions,
             int maxParallelism,
+            boolean isBroadcast,
             SupplierWithException<BufferPool, IOException> bufferPoolFactory) {
         BufferCompressor bufferCompressor = null;
         if (type.supportCompression() && batchShuffleCompressionEnabled) {
@@ -229,17 +240,9 @@ public class ResultPartitionFactory {
                             partitionManager,
                             channelManager.createChannel().getPath(),
                             networkBufferSize,
-                            HybridShuffleConfiguration.builder(
-                                            numberOfSubpartitions,
-                                            batchShuffleReadBufferPool.getNumBuffersPerRequest())
-                                    .setSpillingStrategyType(
-                                            type == ResultPartitionType.HYBRID_FULL
-                                                    ? HybridShuffleConfiguration
-                                                            .SpillingStrategyType.FULL
-                                                    : HybridShuffleConfiguration
-                                                            .SpillingStrategyType.SELECTIVE)
-                                    .build(),
+                            getHybridShuffleConfiguration(numberOfSubpartitions, type),
                             bufferCompressor,
+                            isBroadcast,
                             bufferPoolFactory);
         } else {
             throw new IllegalArgumentException("Unrecognized ResultPartitionType: " + type);
@@ -248,6 +251,19 @@ public class ResultPartitionFactory {
         LOG.debug("{}: Initialized {}", taskNameWithSubtaskAndId, this);
 
         return partition;
+    }
+
+    private HybridShuffleConfiguration getHybridShuffleConfiguration(
+            int numberOfSubpartitions, ResultPartitionType resultPartitionType) {
+        return HybridShuffleConfiguration.builder(
+                        numberOfSubpartitions, batchShuffleReadBufferPool.getNumBuffersPerRequest())
+                .setSpillingStrategyType(
+                        resultPartitionType == ResultPartitionType.HYBRID_FULL
+                                ? HybridShuffleConfiguration.SpillingStrategyType.FULL
+                                : HybridShuffleConfiguration.SpillingStrategyType.SELECTIVE)
+                .setSpilledIndexSegmentSize(hybridShuffleSpilledIndexSegmentSize)
+                .setNumRetainedInMemoryRegionsMax(hybridShuffleNumRetainedInMemoryRegionsMax)
+                .build();
     }
 
     private static void initializeBoundedBlockingPartitions(
@@ -285,6 +301,19 @@ public class ResultPartitionFactory {
         }
     }
 
+    /** Return whether this result partition need overdraft buffer. */
+    private static boolean isOverdraftBufferNeeded(ResultPartitionType resultPartitionType) {
+        // Only pipelined / pipelined-bounded partition needs overdraft buffer. More
+        // specifically, there is no reason to request more buffers for non-pipelined (i.e.
+        // batch) shuffle. The reasons are as follows:
+        // 1. For BoundedBlockingShuffle, each full buffer will be directly released.
+        // 2. For SortMergeShuffle, the maximum capacity of buffer pool is 4 * numSubpartitions. It
+        // is efficient enough to spill this part of memory to disk.
+        // 3. For Hybrid Shuffle, the buffer pool is unbounded. If it can't get a normal buffer, it
+        // also can't get an overdraft buffer.
+        return resultPartitionType.isPipelinedOrPipelinedBoundedResultPartition();
+    }
+
     /**
      * The minimum pool size should be <code>numberOfSubpartitions + 1</code> for two
      * considerations:
@@ -314,7 +343,7 @@ public class ResultPartitionFactory {
                     pair.getRight(),
                     numberOfSubpartitions,
                     maxBuffersPerChannel,
-                    maxOverdraftBuffersPerGate);
+                    isOverdraftBufferNeeded(type) ? maxOverdraftBuffersPerGate : 0);
         };
     }
 
